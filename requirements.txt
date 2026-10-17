@@ -1,0 +1,9 @@
+# Conoce tu planta (v1) - Dependencias verificadas
+# Python >= 3.10
+
+streamlit>=1.40.0,<=1.66.0
+plotly>=5.20.0,<=7.1.0
+rdkit>=2023.09.1
+pandas>=2.2.0,<=3.1.0
+requests>=2.31.0,<=2.35.0
+pytest>=8.0.0,<=9.2.0
