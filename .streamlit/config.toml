@@ -1,0 +1,14 @@
+# FitoEvidencia — tema visual forzado a modo claro.
+# Decisión de diseño (revisión V2): se fuerza el modo claro para garantizar
+# contraste legible (WCAG 2.2 >= 4.5:1) en proyector y en cualquier preferencia
+# de sistema operativo. Streamlit recomienda config.toml sobre CSS para colores.
+[theme]
+base = "light"
+primaryColor = "#2D6A4F"
+backgroundColor = "#FAFCF8"
+secondaryBackgroundColor = "#E8F5E9"
+textColor = "#1C2826"
+font = "sans serif"
+
+[server]
+headless = true

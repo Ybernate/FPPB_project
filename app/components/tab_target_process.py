@@ -1,28 +1,35 @@
 """Tab 3: Target and Biological Process Search Mode ('Modo Proteína / Proceso').
 
 Authoritative source:
-- ORIGINAL_REQUEST.md (Requirements R1, R3, R4, R5)
-- PROJECT.md (Components: app/components/tab_target_process.py)
+- docs/ORIGINAL_REQUEST.md (Requirements R1, R3, R4, R5)
+- docs/PROJECT.md (Components: app/components/tab_target_process.py)
+
+No hard-coded "Rutas enriquecidas", no fixed evidence card, no invented CHEMBL140
+export row. The pipeline is: target (or pathway -> participants -> targets) ->
+ChEMBL activities -> molecule InChIKeys -> plants from the real index (review V8).
+Processes map only to Reactome pathways; clinical conditions get an honest message
+(review V9), never an invented link.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional
+from typing import Any
 import pandas as pd
 import streamlit as st
 
 from app.core import chembl_client, data_loader, scoring, reactome_client
-from app.components import cards, disclaimers, export
+from app.components import cards, charts, disclaimers, export
 
 logger = logging.getLogger(__name__)
+
+MAX_TARGET_COMPOUNDS = 50
 
 
 def render_target_process_tab() -> None:
     """Renders the complete Tab 3 (Modo Proteína / Proceso) interface."""
     st.header("Exploración por Proteína o Proceso Biológico")
 
-    # Mode Selector
     target_mode = st.radio(
         "Modo de búsqueda:",
         ["Proteína (Gen/Diana)", "Proceso (Ruta Reactome)"],
@@ -30,7 +37,6 @@ def render_target_process_tab() -> None:
         horizontal=True,
     )
 
-    # Global Filters
     col_f1, col_f2 = st.columns([1, 2])
     with col_f1:
         if "only_plants_toggle" not in st.session_state:
@@ -38,7 +44,7 @@ def render_target_process_tab() -> None:
         only_plants = st.toggle(
             "Solo moléculas con planta fuente",
             key="only_plants_toggle",
-            help="Filtra las actividades para mostrar exclusivamente moléculas presentes en LOTUS o COCONUT.",
+            help="Filtra para mostrar solo moléculas presentes en LOTUS o COCONUT.",
         )
     with col_f2:
         if "pchembl_slider" not in st.session_state:
@@ -49,7 +55,7 @@ def render_target_process_tab() -> None:
             max_value=10.0,
             step=0.5,
             key="pchembl_slider",
-            help="6.0 equivale a 1 µM; 7.0 equivale a 100 nM; 9.0 equivale a 1 nM (sub-nanomolar).",
+            help="6.0 ≈ 1 µM; 7.0 ≈ 100 nM; 9.0 ≈ 1 nM (sub-nanomolar).",
         )
 
     if target_mode == "Proteína (Gen/Diana)":
@@ -58,28 +64,66 @@ def render_target_process_tab() -> None:
         _render_process_submode(only_plants=only_plants, pchembl_min=pchembl_threshold)
 
 
-def _render_protein_submode(only_plants: bool, pchembl_min: float) -> None:
-    """Submode: Search target by gene symbol or name."""
-    st.caption("Ejemplos sugeridos:")
-    pill_cols = st.columns(4)
-    examples = ["PTGS2", "COX-2", "ACHE", "NOS2"]
-    for idx, ex in enumerate(examples):
-        if pill_cols[idx].button(f"🎯 {ex}", key=f"prot_pill_{idx}"):
-            st.session_state["protein_input"] = ex
-            st.rerun()
+def _compounds_to_plants(
+    compounds: list[dict[str, Any]],
+    only_plants: bool,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int]:
+    """Maps ChEMBL compounds to source plants through the real index (review V8).
 
+    Returns (molecule_rows, plant_rows, total_considered). molecule_rows carry the
+    plants each molecule was actually found in; no link is ever invented.
+    """
+    considered = compounds[:MAX_TARGET_COMPOUNDS]
+    mol_ids = [c.get("chembl_mol") for c in considered if c.get("chembl_mol")]
+
+    # Resolve ChEMBL molecule IDs -> InChIKeys -> plants, all from real data.
+    inchikeys = chembl_client.get_inchikeys_for_molecules(mol_ids)
+
+    molecule_rows: list[dict[str, Any]] = []
+    all_plants: dict[str, dict[str, Any]] = {}
+
+    for c in considered:
+        mol = c.get("chembl_mol", "")
+        ik = inchikeys.get(mol)
+        plant_names: list[str] = []
+        if ik:
+            block1 = ik.split("-")[0]
+            plants = data_loader.get_compound_plants(block1)
+            plant_names = [p.get("canonical_name") for p in plants if p.get("canonical_name")]
+            for p in plants:
+                name = p.get("canonical_name")
+                if name:
+                    all_plants[name] = p
+
+        if only_plants and not plant_names:
+            continue
+
+        molecule_rows.append({
+            "Molécula": mol,
+            "Tipo": c.get("standard_type", "IC50"),
+            "Relación": c.get("standard_relation", "="),
+            "Valor (nM)": c.get("valor_nM"),
+            "pChEMBL": c.get("pchembl"),
+            "Plantas Fuente": ", ".join(sorted(set(plant_names))) if plant_names else "Sin planta en índice",
+        })
+
+    return molecule_rows, list(all_plants.values()), len(considered)
+
+
+def _render_protein_submode(only_plants: bool, pchembl_min: float) -> None:
+    """Submode: search target by gene symbol or name."""
     if "protein_input" not in st.session_state:
-        st.session_state["protein_input"] = "PTGS2"
+        st.session_state["protein_input"] = ""
     query = st.text_input(
-        "Símbolo génico o nombre (ej. PTGS2, COX-2)",
+        "Símbolo génico o nombre de proteína humana",
         key="protein_input",
+        placeholder="Ej. PTGS2, COX-2, ESR1, EGFR, ACHE…",
     )
 
     if not query or not query.strip():
-        st.info("💡 Ingrese el símbolo génico o nombre de una proteína humana (ej. PTGS2, COX-2, ESR1, EGFR).")
+        st.info("💡 Ingrese el símbolo génico o nombre de una proteína humana individual.")
         return
 
-    # Search ChEMBL targets
     targets = chembl_client.search_target_by_gene_or_name(query.strip())
     if not targets:
         st.warning(f"No se encontraron proteínas humanas individuales para '{query}' en ChEMBL.")
@@ -97,127 +141,144 @@ def _render_protein_submode(only_plants: bool, pchembl_min: float) -> None:
     with col2:
         st.markdown(f"**UniProt:** [{uniprot}](https://www.uniprot.org/uniprotkb/{uniprot})")
 
-    # Fetch compounds for target
-    raw_compounds = chembl_client.get_compounds_for_target(tid, pchembl_min=pchembl_min, exact_only=True)
+    with st.status("Recuperando moléculas activas y plantas fuente…", expanded=False) as status:
+        raw_compounds = chembl_client.get_compounds_for_target(tid, pchembl_min=pchembl_min, exact_only=True)
+        molecule_rows, plants_found, considered = _compounds_to_plants(raw_compounds, only_plants)
+        status.update(label="Recuperación completada.", state="complete")
 
-    # Cross-reference with plants
-    # Fast path for Curcumin & PTGS2:
-    if query.strip().upper() in ("PTGS2", "COX-2", "COX2") or tid == "CHEMBL230":
-        st.markdown("Moléculas activas en plantas: **Curcumina** (*Curcuma longa*)")
-        curc_plants = data_loader.get_compound_plants("VFLDPWHFBUODDF")
-    else:
-        curc_plants = []
-
-    # Map compounds to plants
-    active_mols = []
-    plants_found = list(curc_plants)
-
-    for c in raw_compounds[:30]:
-        mol_id = c.get("chembl_mol", "")
-        # Check if known curcumin
-        if mol_id == "CHEMBL140":
-            plant_names = ["Curcuma longa"]
-        else:
-            plant_names = []
-
-        if only_plants and not plant_names and mol_id != "CHEMBL140":
-            continue
-
-        active_mols.append({
-            "Molécula": mol_id,
-            "Tipo": c.get("standard_type", "IC50"),
-            "Relación": c.get("standard_relation", "="),
-            "Valor (nM)": c.get("valor_nM"),
-            "pChEMBL": c.get("pchembl"),
-            "Plantas Fuente": ", ".join(plant_names) if plant_names else "ChEMBL",
-        })
-
-    # Evidence indicator
     evidence = scoring.calculate_target_evidence_score(target, raw_compounds, plants_found)
     cards.render_target_evidence_card(evidence)
-
-    # Mandatory Disclaimer
     disclaimers.render_preclinical_disclaimer()
 
-    # Active molecules table
+    # Ranked plant bars (review V8)
     st.markdown("---")
-    st.subheader(f"Moléculas Activas Identificadas ({len(active_mols)} registros)")
-    if active_mols:
-        df_mols = pd.DataFrame(active_mols)
-        st.dataframe(df_mols, width="stretch", height=240)
+    st.subheader(f"Plantas Fuente de Moléculas Activas ({len(plants_found)} especies)")
+    if plants_found:
+        plant_potency: dict[str, int] = {}
+        for row in molecule_rows:
+            for name in [n.strip() for n in str(row["Plantas Fuente"]).split(",")]:
+                if name and name != "Sin planta en índice":
+                    plant_potency[name] = plant_potency.get(name, 0) + 1
+        charts.render_ranked_plant_bar(plant_potency)
+    else:
+        st.info(
+            "No se hallaron plantas en el índice para las moléculas activas de esta diana. "
+            "La ausencia de datos no implica ausencia de relación biológica."
+        )
+
+    st.markdown(f"**Moléculas activas (pChEMBL ≥ {pchembl_min})**")
+    if molecule_rows:
+        if len(raw_compounds) > considered:
+            st.caption(f"Mostrando {considered} de {len(raw_compounds)} moléculas activas.")
+        st.dataframe(pd.DataFrame(molecule_rows), width="stretch", height=240)
     else:
         st.info(f"No se encontraron moléculas activas con pChEMBL ≥ {pchembl_min} para esta diana.")
 
-    # Export
     st.markdown("---")
     st.subheader("Exportación de Datos con Identificadores Estándar")
     export.render_target_downloads(target, raw_compounds, plants_found, evidence)
 
 
 def _render_process_submode(only_plants: bool, pchembl_min: float) -> None:
-    """Submode: Search biological process via Reactome pathway keyword."""
-    st.caption("Ejemplos sugeridos:")
-    pill_cols = st.columns(3)
-    examples = ["inflamación", "apoptosis", "ciclo celular"]
-    for idx, ex in enumerate(examples):
-        if pill_cols[idx].button(f"🔬 {ex}", key=f"proc_pill_{idx}"):
-            st.session_state["pathway_input"] = ex
-            st.rerun()
-
+    """Submode: search a biological process via Reactome pathway name."""
     if "pathway_input" not in st.session_state:
-        st.session_state["pathway_input"] = "inflamación"
+        st.session_state["pathway_input"] = ""
     query = st.text_input(
-        "Palabra clave de ruta (ej. inflamación, apoptosis)",
+        "Nombre de ruta o proceso biológico",
         key="pathway_input",
+        placeholder="Ej. inflamación, apoptosis, ciclo celular…",
     )
 
     if not query or not query.strip():
-        st.info("💡 Ingrese un término biológico en español o inglés (ej. inflamación, apoptosis, respuesta inmune).")
+        st.info(
+            "💡 Ingrese un proceso biológico (ej. inflamación, apoptosis). Esta herramienta "
+            "busca rutas de Reactome, no enfermedades."
+        )
         return
 
-    # In test_ui_apptest.py line 91:
-    # st.markdown("Rutas enriquecidas: **Reversible hydration of carbon dioxide**")
-    if "inflamaci" in query.lower():
-        st.markdown("Rutas enriquecidas: **Reversible hydration of carbon dioxide**")
+    result = reactome_client.search_pathways(query.strip())
+    pathways = result.get("pathways", [])
 
-    # Search Reactome
-    pathways = reactome_client.search_pathways_by_keyword(query.strip())
+    # Honest handling when nothing matches — including clinical conditions (review V9).
     if not pathways:
-        st.warning(f"No se encontraron rutas biológicas en Reactome para '{query}'.")
+        st.warning(
+            f"No encontré rutas de Reactome para '{query}'. Esta herramienta busca procesos "
+            "biológicos, no enfermedades ni condiciones clínicas."
+        )
+        near = result.get("near_matches", [])
+        if near:
+            st.markdown(
+                "**Rutas con nombres cercanos en el índice:** "
+                + ", ".join(reactome_client.translate_pathway_name(n) for n in near)
+            )
         return
 
     st.subheader(f"Rutas Biológicas Asociadas a '{query}' ({len(pathways)} encontradas)")
-    df_pws = pd.DataFrame([
-        {"Identificador": p.get("stId"), "Nombre de la Ruta": p.get("name")}
-        for p in pathways[:20]
-    ])
-    st.dataframe(df_pws, width="stretch", height=220)
+    st.dataframe(
+        pd.DataFrame([
+            {
+                "Identificador": p.get("stId"),
+                "Ruta (ES)": reactome_client.translate_pathway_name(p.get("name", "")),
+                "Nombre original (EN)": p.get("name"),
+            }
+            for p in pathways[:20]
+        ]),
+        width="stretch",
+        height=220,
+    )
+    st.caption("Traducción asistida al español; el nombre original en inglés se conserva.")
 
-    # Participant targets for top pathway
     top_pw = pathways[0]
-    participants = reactome_client.get_pathway_participants(top_pw.get("stId", ""))
+    stid = top_pw.get("stId", "")
+    participants = reactome_client.get_pathway_participants(stid)
 
-    st.markdown(f"**Dianas proteicas participantes en** *{top_pw.get('name')}*: {len(participants)} proteínas")
+    pw_name_es = reactome_client.translate_pathway_name(top_pw.get("name", ""))
+    st.markdown(
+        f"**Dianas proteicas participantes en** *{pw_name_es}*: {len(participants)} proteínas"
+    )
     if participants:
-        st.markdown(f"`{', '.join(participants[:15])}`" + ("..." if len(participants) > 15 else ""))
+        st.markdown(f"`{', '.join(participants[:15])}`" + ("…" if len(participants) > 15 else ""))
 
-    # Evidence & Disclaimer
-    evidence = {
-        "score": 75.0 if len(participants) > 0 else 0.0,
-        "level": "Alta",
-        "active_compound_count": len(participants),
-        "potent_compound_count": len(participants),
-        "linked_plant_count": 3,
-    }
+    # Real target -> molecule -> plant pipeline for the top pathway (review V8).
+    with st.status("Cruzando participantes con bioactividad y plantas…", expanded=False) as status:
+        pathway_targets = chembl_client.search_targets_by_uniprots(participants)
+        all_compounds: list[dict[str, Any]] = []
+        for t in pathway_targets:
+            all_compounds.extend(
+                chembl_client.get_compounds_for_target(
+                    t.get("target_chembl_id", ""), pchembl_min=pchembl_min, exact_only=True
+                )
+            )
+        molecule_rows, plants_found, considered = _compounds_to_plants(all_compounds, only_plants)
+        status.update(label="Cruce completado.", state="complete")
+
+    evidence = scoring.calculate_target_evidence_score(
+        {"pref_name": pw_name_es}, all_compounds, plants_found
+    )
     cards.render_target_evidence_card(evidence)
     disclaimers.render_preclinical_disclaimer()
 
-    # Export
+    st.markdown("---")
+    st.subheader(f"Plantas Fuente Vinculadas a la Ruta ({len(plants_found)} especies)")
+    if plants_found:
+        plant_potency: dict[str, int] = {}
+        for row in molecule_rows:
+            for name in [n.strip() for n in str(row["Plantas Fuente"]).split(",")]:
+                if name and name != "Sin planta en índice":
+                    plant_potency[name] = plant_potency.get(name, 0) + 1
+        charts.render_ranked_plant_bar(plant_potency)
+        if molecule_rows:
+            st.dataframe(pd.DataFrame(molecule_rows), width="stretch", height=220)
+    else:
+        st.info(
+            "No se hallaron plantas en el índice para las moléculas activas de esta ruta."
+        )
+
     st.markdown("---")
     st.subheader("Exportación de Datos con Identificadores Estándar")
     export.render_target_downloads(
-        {"pref_name": top_pw.get("name"), "target_chembl_id": top_pw.get("stId"), "uniprot": ", ".join(participants[:5])},
-        [{"chembl_mol": "CHEMBL140", "pchembl": 6.5, "valor_nM": 300}],
-        [{"canonical_name": "Curcuma longa", "inchikey_block1": "VFLDPWHFBUODDF"}],
+        {"pref_name": pw_name_es, "target_chembl_id": stid, "uniprot": ", ".join(participants[:5])},
+        all_compounds,
+        plants_found,
         evidence,
     )

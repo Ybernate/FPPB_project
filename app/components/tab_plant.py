@@ -1,8 +1,12 @@
 """Tab 1: Plant Search Mode ('Modo Planta').
 
 Authoritative source:
-- ORIGINAL_REQUEST.md (Requirements R1, R3, R4, R5)
-- PROJECT.md (Components: app/components/tab_plant.py)
+- docs/ORIGINAL_REQUEST.md (Requirements R1, R3, R4, R5)
+- docs/PROJECT.md (Components: app/components/tab_plant.py)
+
+Every plant runs through one identical pipeline (review D6): no Curcuma branch,
+no hard-coded results. Recognised-but-empty species get an honest empty state
+with a Score of 0 (review D7), never a hidden result.
 """
 
 from __future__ import annotations
@@ -13,14 +17,21 @@ import pandas as pd
 import streamlit as st
 
 from app.core import chembl_client, data_loader, name_resolver, scoring, reactome_client
-from app.components import cards, charts, chem_render, disclaimers, export
+from app.components import autocomplete, cards, charts, chem_render, disclaimers, export
 
 logger = logging.getLogger(__name__)
 
+# Cap on compounds routed through the (network-bound) ChEMBL activity fetch. The
+# cap is disclosed in the UI when it bites (review D6); it is not a silent truncation.
+MAX_COMPOUNDS_FOR_ACTIVITIES = 60
 
-@st.cache_data(show_spinner=False)
-def _load_plant_data(canonical_name: str) -> tuple[list[dict], list[dict], dict, dict]:
-    """Loads compounds, bioactivities, reactome enrichment, and coverage score for a plant."""
+
+def _load_plant_data(canonical_name: str) -> tuple[list[dict], list[dict], dict, dict, dict]:
+    """Loads compounds, bioactivities, Reactome enrichment and coverage score for a plant.
+
+    Returns (compounds, activities, reactome_data, score_dict, meta) where meta carries
+    the number of compounds analysed vs. total (for honest cap disclosure).
+    """
     compounds = data_loader.get_plant_compounds(canonical_name)
 
     # Match compounds with ChEMBL by InChIKey
@@ -35,118 +46,123 @@ def _load_plant_data(canonical_name: str) -> tuple[list[dict], list[dict], dict,
                 c["name"] = m.get("pref_name") or m.get("name")
             c["n_blancos_proteina"] = m.get("n_blancos_proteina", 0)
 
-    all_activities: list[dict[str, Any]] = []
+    # One pipeline for every plant: fetch activities for all matched compounds,
+    # up to a disclosed cap. No special-casing of Curcuma or CHEMBL140.
     chembl_compounds = [c for c in compounds if c.get("chembl_id")]
+    n_matched = len(chembl_compounds)
+    to_analyse = chembl_compounds[:MAX_COMPOUNDS_FOR_ACTIVITIES]
 
-    # For Curcuma longa, load full pilot activities for authoritative replication
-    if canonical_name.lower() == "curcuma longa" or any(c.get("chembl_id") == "CHEMBL140" for c in compounds):
-        chembl_client._preload_pilot_data()
-        for cid, acts in chembl_client._PILOT_ACTIVITIES_BY_MOL.items():
-            all_activities.extend(acts)
-    else:
-        for c in chembl_compounds[:5]:
-            cid = c.get("chembl_id")
-            if cid:
-                acts = chembl_client.get_activities_for_molecule(cid)
-                all_activities.extend(acts)
+    all_activities: list[dict[str, Any]] = []
+    for c in to_analyse:
+        cid = c.get("chembl_id")
+        if cid:
+            all_activities.extend(chembl_client.get_activities_for_molecule(cid))
 
-    # Extract UniProt IDs for Reactome analysis
     uniprot_ids = sorted({a.get("uniprot") for a in all_activities if a.get("uniprot")})
     reactome_data = reactome_client.get_pathway_enrichment(uniprot_ids, page_size=15)
 
-    # Calculate Data Coverage Score
     score_dict = scoring.calculate_data_coverage_score(compounds, all_activities, reactome_data)
 
-    return compounds, all_activities, reactome_data, score_dict
+    meta = {
+        "n_matched": n_matched,
+        "n_analysed": len(to_analyse),
+        "capped": n_matched > len(to_analyse),
+    }
+    return compounds, all_activities, reactome_data, score_dict, meta
 
 
 def render_plant_tab() -> None:
     """Renders the complete Tab 1 (Modo Planta) interface."""
     st.header("Exploración por Planta")
 
-    # Example pills
-    st.caption("Especies sugeridas de demostración:")
-    pill_cols = st.columns(4)
-    examples = ["Curcuma longa", "Matricaria chamomilla", "Allium sativum", "Smallanthus sonchifolius"]
-    example_labels = ["Cúrcuma", "Manzanilla", "Ajo", "Yacón"]
-
-    for idx, (ex_val, ex_lbl) in enumerate(zip(examples, example_labels)):
-        if pill_cols[idx].button(f"🌿 {ex_lbl}", key=f"plant_pill_{idx}"):
-            st.session_state["plant_search"] = ex_val
-            st.rerun()
-
-    # Search text input
-    if "plant_search" not in st.session_state:
-        st.session_state["plant_search"] = "Curcuma longa"
-    plant_input = st.text_input(
-        "Ingrese nombre científico o común",
-        key="plant_search",
-        help="Acepta nombres en latín, autores (ej. 'Curcuma longa L.'), sinónimos taxonómicos y nombres comunes en español o inglés.",
+    query = autocomplete.search_input(
+        label="Nombre científico o común de la planta",
+        state_key="plant_search",
+        search_fn=data_loader.suggest_plants,
+        placeholder="Ej. Curcuma longa, cúrcuma, ajo, manzanilla…",
+        help_text=(
+            "Acepta nombre en latín, autores (ej. 'Curcuma longa L.'), sinónimos "
+            "taxonómicos y nombres comunes en español o inglés."
+        ),
+        empty_prompt=(
+            "💡 Escriba el nombre de una especie botánica para explorar su evidencia molecular."
+        ),
     )
-
-    col1, col2 = st.columns([1, 1])
-    with col1:
-        search_clicked = st.button("Buscar Planta", key="btn_search_plant")
-    with col2:
-        photo_clicked = st.button("📷 Identificar por foto (próximamente)", key="btn_photo_placeholder")
-
-    if photo_clicked:
-        st.info("La identificación por fotografía se encuentra en desarrollo para futuras versiones.")
-
-    query = plant_input.strip() if plant_input else ""
     if not query:
-        st.info("💡 Ingrese el nombre de una especie botánica en el buscador superior para iniciar el análisis molecular.")
         return
 
-    # Name Resolution
+    # Name resolution with three distinct honest outcomes (review D7).
     resolved = name_resolver.resolve_plant_name(query)
     if resolved.get("status") == "NO_DATA":
-        st.warning(f"No se registran metabolitos en LOTUS/COCONUT para '{query}'.")
+        st.warning(
+            f"No se reconoció '{query}' como una especie botánica. "
+            "Verifique la ortografía o use el nombre científico."
+        )
         suggs = resolved.get("suggestions", [])
         if suggs:
-            st.markdown(f"**Especies sugeridas del mismo género o relacionadas:** {', '.join(suggs)}")
+            st.markdown(f"**¿Quiso decir?** {', '.join(suggs)}")
         return
 
     canonical_name = resolved.get("canonical_name", query)
 
-    # 1. Taxonomic Confirmation Card (R1)
+    # Taxonomic confirmation (R1)
     cards.render_taxonomic_confirmation_card(resolved)
 
-    # Fetch data
-    compounds, activities, reactome_data, score_dict = _load_plant_data(canonical_name)
+    # Fetch data with a visible progress indicator on the cold run (review D6).
+    with st.status(f"Analizando evidencia molecular de *{canonical_name}*…", expanded=False) as status:
+        compounds, activities, reactome_data, score_dict, meta = _load_plant_data(canonical_name)
+        status.update(label=f"Análisis de *{canonical_name}* completado.", state="complete")
+
     pathways = reactome_data.get("pathways", [])
 
+    # Honest empty state: recognised plant, but zero compounds in the index (D7).
     if not compounds:
-        st.warning(f"No se registran compuestos fitoquímicos para *{canonical_name}* en las bases de datos locales.")
+        disclaimers.render_preclinical_disclaimer()
+        st.warning(
+            f"Se reconoció *{canonical_name}*, pero no hay compuestos registrados para esta "
+            "especie en el índice local de LOTUS/COCONUT."
+        )
+        st.info(
+            "**Puntaje de Cobertura de Datos: 0 / 100.** La ausencia de datos no significa "
+            "ausencia de efecto; significa que esta especie aún no tiene química reportada en el índice."
+        )
         suggs = resolved.get("suggestions", [])
         if suggs:
-            st.markdown(f"**Especies sugeridas:** {', '.join(suggs)}")
+            st.markdown(f"**Especies relacionadas con datos:** {', '.join(suggs)}")
         return
 
-    # 2. Mandatory Pre-clinical Disclaimer (R4)
+    # Mandatory pre-clinical disclaimer (R4) — rendered once, here, per screen.
     disclaimers.render_preclinical_disclaimer()
 
-    # 3. Scientific Honesty Alerts (R4)
-    # Single-molecule dominance warning (e.g. Curcumin 60.7%)
+    # Disclose the analysis cap when it bit (review D6).
+    if meta.get("capped"):
+        st.info(
+            f"ℹ️ Se analizaron {meta['n_analysed']} de {meta['n_matched']} compuestos con "
+            "coincidencia en ChEMBL (límite para mantener la respuesta ágil)."
+        )
+
+    # Scientific honesty alerts (R4)
     dominance_data = score_dict.get("dominance", {})
     dominance_data["total_targets"] = score_dict.get("target_count", 0)
     disclaimers.render_dominance_alert(dominance_data)
-
-    # Carbonic Anhydrase panel inflation alert
-    ca_alert = score_dict.get("ca_panel_alert", {})
-    disclaimers.render_ca_panel_alert(ca_alert)
-
-    # Extreme sub-nanomolar affinity alert
-    extreme_alert = score_dict.get("extreme_affinity_alert", {})
-    disclaimers.render_extreme_affinity_alert(extreme_alert, chembl_id=dominance_data.get("top_compound", ""))
-
-    # Stereoisomer grouping notice
+    disclaimers.render_ca_panel_alert(score_dict.get("ca_panel_alert", {}))
+    disclaimers.render_extreme_affinity_alert(
+        score_dict.get("extreme_affinity_alert", {}),
+        chembl_id=dominance_data.get("top_compound", ""),
+    )
     disclaimers.render_stereoisomer_notice()
 
-    # 4. Data Coverage Score Card with 5-Component Breakdown (R3)
+    # Data Coverage Score (R3)
     cards.render_data_coverage_score_card(score_dict)
 
-    # 5. Interactive Plotly Charts (R5)
+    # Honest empty state: compounds found, but none matched in ChEMBL (D7).
+    if not activities:
+        st.info(
+            "Se encontraron compuestos para esta especie, pero ninguno tiene bioactividad "
+            "humana medida en ChEMBL todavía. El puntaje refleja esa cobertura parcial."
+        )
+
+    # Interactive charts (R5)
     st.markdown("---")
     st.subheader("Visualizaciones Interactivas")
 
@@ -155,21 +171,17 @@ def render_plant_tab() -> None:
         "🕸️ Red Planta–Moléculas–Dianas",
         "📊 Rutas Biológicas Reactome",
     ])
-
     with tab_funnel:
         charts.render_data_funnel(compounds, activities, reactome_data)
-
     with tab_net:
         charts.render_tripartite_network(canonical_name, compounds, activities)
-
     with tab_paths:
-        charts.render_pathway_bar_chart(pathways)
+        charts.render_pathway_bar_chart(pathways, activities=activities)
 
-    # 6. Compounds Table (R3)
+    # Compounds table (R3)
     st.markdown("---")
     st.subheader(f"Compuestos Fitoquímicos Identificados ({len(compounds)} registros)")
 
-    # Prepare DataFrame for display
     mol_uniprots: dict[str, set[str]] = {}
     for a in activities:
         mol = a.get("chembl_mol")
@@ -186,10 +198,9 @@ def render_plant_tab() -> None:
             return None
 
     table_data = []
-    for c in compounds[:60]:
+    for c in compounds[:MAX_COMPOUNDS_FOR_ACTIVITIES]:
         cid = c.get("chembl_id") or ""
         t_count = len(mol_uniprots.get(cid, ()))
-
         table_data.append({
             "Nombre": c.get("nombre") or c.get("name") or "Desconocido",
             "InChIKey": c.get("inchikey", ""),
@@ -203,13 +214,15 @@ def render_plant_tab() -> None:
             "Fuente": c.get("source_db", "LOTUS"),
         })
 
-    df_compounds = pd.DataFrame(table_data)
-    st.dataframe(df_compounds, width="stretch", height=280)
+    st.dataframe(pd.DataFrame(table_data), width="stretch", height=280)
 
-    # Highlight top compound structure (e.g. Curcumin)
+    # Top-compound structure
     top_c = compounds[0] if compounds else {}
     if top_c.get("smiles"):
-        with st.expander(f"🔬 Estructura química 2D del metabolito principal: {top_c.get('name')}", expanded=False):
+        with st.expander(
+            f"🔬 Estructura química 2D del metabolito principal: {top_c.get('name')}",
+            expanded=False,
+        ):
             col_img, col_info = st.columns([1, 2])
             with col_img:
                 chem_render.render_molecule_svg(
@@ -221,9 +234,12 @@ def render_plant_tab() -> None:
                 st.markdown(f"**InChIKey:** `{top_c.get('inchikey')}`")
                 st.markdown(f"**SMILES:** `{top_c.get('smiles')}`")
                 st.markdown(f"**Referencias bibliográficas:** {top_c.get('n_refs', 1)}")
-                st.markdown(f"**Propiedades Drug-likeness:** MW: {top_c.get('mw')} | ALogP: {top_c.get('alogp')} | QED: {top_c.get('qed')}")
+                st.markdown(
+                    f"**Propiedades Drug-likeness:** MW: {top_c.get('mw')} | "
+                    f"ALogP: {top_c.get('alogp')} | QED: {top_c.get('qed')}"
+                )
 
-    # 7. Standard Exports (R5)
+    # Exports (R5)
     st.markdown("---")
     st.subheader("Exportación de Datos con Identificadores Estándar")
     export.render_plant_downloads(canonical_name, compounds, activities, pathways, score_dict)

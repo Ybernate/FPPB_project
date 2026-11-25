@@ -251,64 +251,135 @@ def render_tripartite_network(
     st.plotly_chart(fig)
 
 
+def _pathway_molecule_hover(
+    pathway: dict[str, Any],
+    activities: list[dict[str, Any]],
+    max_items: int = 5,
+) -> str:
+    """Builds the V6 hover: which proteins and molecules drive this pathway.
+
+    Intersects the pathway's known participant UniProts (when present on the pathway
+    dict as ``participants``) with the measured activities to name the molecules that
+    actually hit the pathway, with their best pChEMBL. Falls back to counts only.
+    """
+    participants = set(pathway.get("participants") or [])
+    lines: list[str] = []
+
+    if participants:
+        # proteins in this pathway that we measured
+        measured = [
+            a for a in activities
+            if a.get("uniprot") in participants and a.get("pchembl") is not None
+        ]
+        proteins = sorted({a.get("uniprot") for a in measured if a.get("uniprot")})
+        if proteins:
+            shown = proteins[:max_items]
+            lines.append(
+                "Proteínas: " + ", ".join(shown)
+                + (f" +{len(proteins) - len(shown)} más" if len(proteins) > len(shown) else "")
+            )
+
+        # molecules -> best pChEMBL on this pathway's proteins
+        mol_best: dict[str, float] = {}
+        mol_n: dict[str, int] = {}
+        for a in measured:
+            mol = a.get("chembl_mol")
+            try:
+                p = float(a.get("pchembl"))
+            except (TypeError, ValueError):
+                continue
+            if mol:
+                mol_n[mol] = mol_n.get(mol, 0) + 1
+                mol_best[mol] = max(mol_best.get(mol, 0.0), p)
+        if mol_best:
+            top = sorted(mol_best.items(), key=lambda kv: kv[1], reverse=True)[:max_items]
+            lines.append(
+                "Moléculas: "
+                + ", ".join(f"{m} (n={mol_n[m]}, pChEMBL máx {v:.1f})" for m, v in top)
+            )
+            # per-pathway dominance (R4 honesty)
+            total_meas = sum(mol_n.values())
+            top_mol, top_cnt = max(mol_n.items(), key=lambda kv: kv[1])
+            if total_meas:
+                share = 100.0 * top_cnt / total_meas
+                if share >= 50.0:
+                    lines.append(f"⚠️ {share:.0f}% de las mediciones provienen de {top_mol}")
+
+    return ("<br>" + "<br>".join(lines)) if lines else ""
+
+
 def render_pathway_bar_chart(
     pathways: list[dict[str, Any]],
-    pchembl_threshold: float = 6.0,
+    activities: Optional[list[dict[str, Any]]] = None,
     max_pathways: int = 12,
 ) -> None:
-    """Renders horizontal bar chart of enriched Reactome pathways sorted by -log10(FDR)."""
+    """Renders a horizontal bar chart of enriched Reactome pathways by -log10(FDR).
+
+    Names are shown in Spanish (review V5); the English original and the driving
+    molecules appear on hover (review V6). The carbonic-anhydrase panel bias is
+    flagged by stId so it survives translation (review V5). No pChEMBL claim is made
+    in the title because enrichment is computed over the measured targets as supplied
+    (review X2).
+    """
+    from app.core import reactome_client  # local import to avoid a cycle
+
     if not pathways:
         st.info("No se encontraron rutas biológicas enriquecidas para el conjunto de dianas.")
         return
 
-    # Filter or take top pathways
+    activities = activities or []
     top_p = pathways[:max_pathways]
 
-    names = []
-    neg_log_fdrs = []
-    colors = []
-    custom_texts = []
+    names, neg_log_fdrs, colors, custom_texts, patterns = [], [], [], [], []
 
-    # Reverse so top significance is on top of horizontal chart
     for p in reversed(top_p):
-        name = p.get("name") or p.get("ruta") or p.get("stId", "")
+        en_name = p.get("name") or p.get("ruta") or p.get("stId", "")
+        st_id = p.get("stId") or p.get("id") or ""
+        es_name = reactome_client.translate_pathway_name(en_name, st_id=st_id)
         fdr = float(p.get("fdr", 1.0))
-        # Protect against log10(0)
-        neg_log = -math.log10(max(fdr, 1e-16))
-        neg_log = min(16.0, neg_log)
+        neg_log = min(16.0, -math.log10(max(fdr, 1e-16)))
         found = p.get("entities_found", 0)
         total = p.get("entities_total", 0)
 
-        # Flag carbonic anhydrase panel bias
-        is_bias = "carbon dioxide" in name.lower() or "carbonic" in name.lower()
+        is_bias = reactome_client.is_ca_panel_pathway(p)
 
-        names.append(name[:45] + ("..." if len(name) > 45 else ""))
+        display = es_name[:45] + ("…" if len(es_name) > 45 else "")
+        names.append(display)
         neg_log_fdrs.append(round(neg_log, 2))
-        colors.append("#D97706" if is_bias else "#2D6A4F")
-        custom_texts.append(
-            f"<b>{name}</b><br>FDR: {fdr:.2e}<br>Dianas: {found}/{total}"
-            + ("<br>⚠️ <i>Sesgo de panel de isoformas detectado</i>" if is_bias else "")
+        # Okabe-Ito: orange for the flagged bias, bluish-green otherwise.
+        colors.append("#E69F00" if is_bias else "#009E73")
+        # Redundant encoding so colour is never the only cue (scientific-viz rule).
+        patterns.append("/" if is_bias else "")
+        hover = (
+            f"<b>{es_name}</b><br><i>{en_name}</i> · {st_id}"
+            f"<br>FDR: {fdr:.2e}<br>Dianas: {found}/{total}"
+            + _pathway_molecule_hover(p, activities)
+            + ("<br>⚠️ <i>Posible sesgo de panel de isoformas (anhidrasa carbónica)</i>" if is_bias else "")
         )
+        custom_texts.append(hover)
 
     fig = go.Figure(
         go.Bar(
             x=neg_log_fdrs,
             y=names,
             orientation="h",
-            marker={"color": colors, "line": {"width": 1, "color": "#D9E2D5"}},
+            marker={
+                "color": colors,
+                "line": {"width": 1, "color": "#D9E2D5"},
+                "pattern": {"shape": patterns},
+            },
             hovertext=custom_texts,
             hoverinfo="text",
         )
     )
-
     fig.update_layout(
         title={
-            "text": f"<b>Rutas Reactome Enriquecidas (−log₁₀ FDR) [pChEMBL ≥ {pchembl_threshold}]</b>",
+            "text": "<b>Rutas Reactome Enriquecidas (−log₁₀ FDR)</b>",
             "font": {"size": 16, "color": "#1B4332"},
             "x": 0.5,
             "xanchor": "center",
         },
-        xaxis_title="Significancia Estadística (−log₁₀ FDR)",
+        xaxis_title="Significancia estadística (−log₁₀ FDR)",
         yaxis_title="",
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
@@ -316,5 +387,138 @@ def render_pathway_bar_chart(
         height=380,
         font={"family": "-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif"},
     )
+    st.plotly_chart(fig)
 
+
+def render_compound_plants_bar(plants: list[dict[str, Any]], max_plants: int = 15) -> None:
+    """Horizontal bars of reference counts per source plant for a molecule (review V7)."""
+    if not plants:
+        st.info("No se encontraron especies vegetales asociadas a este compuesto.")
+        return
+
+    ranked = sorted(
+        plants,
+        key=lambda p: (p.get("n_refs") or p.get("reference_count", 1) or 1),
+        reverse=True,
+    )[:max_plants]
+    names = [p.get("canonical_name", "?") for p in reversed(ranked)]
+    refs = [p.get("n_refs") or p.get("reference_count", 1) or 1 for p in reversed(ranked)]
+    sources = [str(p.get("source_db", "LOTUS")) for p in reversed(ranked)]
+
+    # Okabe-Ito by source, with a text label so colour is not the only cue.
+    palette = {"LOTUS": "#0072B2", "COCONUT": "#D55E00", "both": "#009E73", "LOTUS+COCONUT": "#009E73"}
+    colors = [palette.get(s, "#009E73") for s in sources]
+
+    fig = go.Figure(
+        go.Bar(
+            x=refs, y=names, orientation="h",
+            marker={"color": colors, "line": {"width": 1, "color": "#D9E2D5"}},
+            text=sources, textposition="outside",
+            hovertext=[f"<b>{n}</b><br>Referencias: {r}<br>Fuente: {s}" for n, r, s in zip(names, refs, sources)],
+            hoverinfo="text",
+        )
+    )
+    fig.update_layout(
+        title={"text": "<b>Plantas fuente (referencias por especie)</b>",
+               "font": {"size": 15, "color": "#1B4332"}, "x": 0.5, "xanchor": "center"},
+        xaxis_title="Número de referencias (no es cero cuando falta: ausencia marcada aparte)",
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        margin={"l": 20, "r": 40, "t": 40, "b": 40}, height=360,
+    )
+    st.plotly_chart(fig)
+
+
+def render_target_dotplot(activities: list[dict[str, Any]], max_targets: int = 25) -> None:
+    """Dot plot of pChEMBL per target, one point per measurement (review V7).
+
+    Keeps replicates (does not average), marks censored relations with hollow markers,
+    shows a strip for measurements without pChEMBL, and a reference line at pChEMBL 6.
+    """
+    if not activities:
+        st.info("No se registran mediciones de bioactividad sobre proteínas humanas.")
+        return
+
+    with_p = [a for a in activities if a.get("pchembl") is not None]
+    without_p = [a for a in activities if a.get("pchembl") is None]
+
+    # Order targets by best pChEMBL.
+    best: dict[str, float] = {}
+    for a in with_p:
+        t = a.get("target") or a.get("target_pref_name") or a.get("uniprot") or "?"
+        try:
+            best[t] = max(best.get(t, 0.0), float(a.get("pchembl")))
+        except (TypeError, ValueError):
+            pass
+    order = [t for t, _ in sorted(best.items(), key=lambda kv: kv[1])][-max_targets:]
+
+    fig = go.Figure()
+    xs_solid, ys_solid, xs_hollow, ys_hollow, hov_s, hov_h = [], [], [], [], [], []
+    for a in with_p:
+        t = a.get("target") or a.get("target_pref_name") or a.get("uniprot") or "?"
+        if t not in order:
+            continue
+        try:
+            p = float(a.get("pchembl"))
+        except (TypeError, ValueError):
+            continue
+        rel = a.get("relacion") or a.get("standard_relation", "=")
+        label = f"{a.get('chembl_mol', '')} · {a.get('tipo') or a.get('standard_type', '')} {rel} pChEMBL {p:.2f}"
+        if rel == "=":
+            xs_solid.append(p); ys_solid.append(t); hov_s.append(label)
+        else:
+            xs_hollow.append(p); ys_hollow.append(t); hov_h.append(label)
+
+    if xs_solid:
+        fig.add_trace(go.Scatter(
+            x=xs_solid, y=ys_solid, mode="markers", name="relación = (exacta)",
+            marker={"color": "#0072B2", "size": 9, "line": {"width": 1, "color": "#FFFFFF"}},
+            hovertext=hov_s, hoverinfo="text",
+        ))
+    if xs_hollow:
+        fig.add_trace(go.Scatter(
+            x=xs_hollow, y=ys_hollow, mode="markers", name="relación censurada (> o <)",
+            marker={"color": "rgba(0,0,0,0)", "size": 10, "line": {"width": 1.5, "color": "#0072B2"}},
+            hovertext=hov_h, hoverinfo="text",
+        ))
+
+    fig.add_vline(x=6.0, line_dash="dash", line_color="#D55E00",
+                  annotation_text="pChEMBL 6 (1 µM)", annotation_position="top")
+
+    title = "<b>Potencia por blanco (pChEMBL, una marca por medición)</b>"
+    if without_p:
+        title += f"<br><span style='font-size:11px'>{len(without_p)} mediciones sin pChEMBL mostradas aparte, no descartadas</span>"
+    fig.update_layout(
+        title={"text": title, "font": {"size": 15, "color": "#1B4332"}, "x": 0.5, "xanchor": "center"},
+        xaxis_title="pChEMBL (mayor = más potente)", yaxis_title="",
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        margin={"l": 20, "r": 20, "t": 60, "b": 40}, height=max(360, 18 * len(order) + 120),
+        legend={"orientation": "h", "y": -0.15},
+    )
+    st.plotly_chart(fig)
+
+    if without_p:
+        st.caption(f"ℹ️ {len(without_p)} medición(es) sin valor pChEMBL no se grafican como 0; se listan en la tabla.")
+
+
+def render_ranked_plant_bar(plant_potency: dict[str, int], max_plants: int = 15) -> None:
+    """Horizontal bars ranking plants by number of potent molecules (review V8)."""
+    if not plant_potency:
+        st.info("No hay plantas que graficar para esta diana o ruta.")
+        return
+    items = sorted(plant_potency.items(), key=lambda kv: kv[1])[-max_plants:]
+    names = [k for k, _ in items]
+    counts = [v for _, v in items]
+    fig = go.Figure(go.Bar(
+        x=counts, y=names, orientation="h",
+        marker={"color": "#009E73", "line": {"width": 1, "color": "#D9E2D5"}},
+        hovertext=[f"<b>{n}</b><br>Moléculas activas: {c}" for n, c in zip(names, counts)],
+        hoverinfo="text",
+    ))
+    fig.update_layout(
+        title={"text": "<b>Plantas por número de moléculas activas</b>",
+               "font": {"size": 15, "color": "#1B4332"}, "x": 0.5, "xanchor": "center"},
+        xaxis_title="Moléculas activas (recuento)",
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        margin={"l": 20, "r": 20, "t": 40, "b": 40}, height=max(300, 22 * len(names) + 100),
+    )
     st.plotly_chart(fig)

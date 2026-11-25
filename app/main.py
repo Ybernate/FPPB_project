@@ -1,9 +1,9 @@
-"""Conoce tu planta - Explorador Multidireccional de Productos Naturales (v1.0).
+"""FitoEvidencia - Explorador Multidireccional de Evidencia Molecular de Plantas.
 
 Entrypoint for Streamlit web application.
 Authoritative source:
-- ORIGINAL_REQUEST.md (Requirements R1, R3, R4, R5, R6)
-- PROJECT.md (Architecture, Components, Milestones)
+- docs/ORIGINAL_REQUEST.md (Requirements R1, R3, R4, R5, R6)
+- docs/PROJECT.md (Architecture, Components, Milestones)
 """
 
 from __future__ import annotations
@@ -19,13 +19,14 @@ if str(REPO_ROOT) not in sys.path:
 
 from app import state
 from app.styles import theme
+from app.core import build_info
 from app.components import disclaimers, tab_plant, tab_molecule, tab_target_process
 
 
 def main() -> None:
     """Main application routine initializing configuration, theme, and search tabs."""
     st.set_page_config(
-        page_title="Conoce tu planta",
+        page_title="FitoEvidencia",
         page_icon="🌿",
         layout="wide",
         initial_sidebar_state="collapsed",
@@ -38,11 +39,21 @@ def main() -> None:
     theme.inject_botanical_theme()
 
     # Application Header
-    st.title("🌿 Conoce tu planta")
+    st.title("🌿 FitoEvidencia")
     st.caption(
-        "Plataforma de Exploración Fitoquímica y Bioactividad Molecular | "
+        "Evidencia molecular abierta sobre plantas, compuestos, blancos y rutas | "
         "Integración LOTUS • COCONUT • ChEMBL • Reactome"
     )
+
+    # Demo-mode banner when the index was built in seed/demo mode (review D1/D3)
+    info = build_info.get_build_info()
+    if info.get("mode") == "demo":
+        st.warning(
+            "🧪 **Modo demostración:** el índice local contiene solo especies semilla "
+            f"({info.get('organism_count', 0)} plantas, {info.get('compound_count', 0)} compuestos). "
+            "No representa el índice completo de LOTUS/COCONUT. "
+            "Ejecute `python scripts/prepare_data.py --download` para construir el índice real."
+        )
 
     # Mandatory Pre-clinical Disclaimer Banner across all pages
     disclaimers.render_preclinical_disclaimer()
@@ -63,13 +74,9 @@ def main() -> None:
     with tab_t:
         tab_target_process.render_target_process_tab()
 
-    # Footer
+    # Footer — provenance read from the build_info table (review D3), never hard-coded.
     st.markdown("---")
-    st.caption(
-        "**Conoce tu planta v1.0** — Datos integrados de LOTUS (Zenodo snapshot 19360665), "
-        "COCONUT (10-2026), ChEMBL (REST API v2.0) y Reactome (Analysis Service v7.0). "
-        "Plataforma con fines académicos y de exploración biomolecular. No constituye prescripción médica ni evidencia clínica."
-    )
+    st.caption(build_info.render_footer_text())
 
 
 if __name__ == "__main__":

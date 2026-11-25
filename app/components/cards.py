@@ -24,31 +24,20 @@ def render_taxonomic_confirmation_card(resolved_info: dict[str, Any]) -> None:
         en = resolved_info.get("synonyms_en") or []
         common_names = es + en
     common_names_str = ", ".join(common_names[:4]) if common_names else "No registrados"
-    image_url = resolved_info.get("image_url")
     status = resolved_info.get("status")
     message = resolved_info.get("message")
 
-    col1, col2 = st.columns([3, 1] if image_url else [1, 0.01])
-    with col1:
-        st.markdown(f"**Nombre aceptado:** *{scientific_name}*")
-        st.markdown(f"**Familia:** {family}")
-        st.markdown(f"**Nombres comunes:** {common_names_str}")
+    # Photos are intentionally not shown: the previously hard-coded iNaturalist URLs
+    # could display the wrong species (review X1). If images are wanted later, fetch
+    # them at runtime from GBIF occurrence media with attribution.
+    st.markdown(f"**Nombre aceptado:** *{scientific_name}*")
+    st.markdown(f"**Familia:** {family}")
+    st.markdown(f"**Nombres comunes:** {common_names_str}")
 
-        if status == "SYNONYM_RESOLVED" or resolved_info.get("is_synonym"):
-            st.info(f"ℹ️ Sinónimo taxonómico resuelto: El nombre buscado redirige al taxón aceptado *{accepted_name}*.")
-        elif status == "FUZZY_MATCH" and message:
-            st.info(f"ℹ️ {message}")
-
-    if image_url:
-        with col2:
-            st.markdown(
-                f'<div style="text-align:center;">'
-                f'<img src="{image_url}" alt="Fotografía de {accepted_name}" '
-                f'style="max-width:100%; border-radius:8px; border:1px solid #D9E2D5;"/>'
-                f'<div style="font-size:0.75rem; color:#6B7280; margin-top:4px;">Fotografía de {accepted_name}</div>'
-                f'</div>',
-                unsafe_allow_html=True,
-            )
+    if status == "SYNONYM_RESOLVED" or resolved_info.get("is_synonym"):
+        st.info(f"ℹ️ Sinónimo taxonómico resuelto: El nombre buscado redirige al taxón aceptado *{accepted_name}*.")
+    elif status == "FUZZY_MATCH" and message:
+        st.info(f"ℹ️ {message}")
 
 
 def render_data_coverage_score_card(score_dict: dict[str, Any]) -> None:

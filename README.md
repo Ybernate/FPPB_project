@@ -1,9 +1,16 @@
-# Conoce tu planta (v1)
+# FitoEvidencia
 
-> **Aplicativo web interactivo para la exploración fitoquímica y biológica integrada**  
-> *Integración de datos abiertos: LOTUS, COCONUT, ChEMBL y Reactome*  
-> **Autor:** Yedidias Bernate  
+> **Evidencia molecular abierta sobre plantas, compuestos, blancos y rutas**
+> *Integración de datos abiertos: LOTUS, COCONUT, ChEMBL y Reactome*
+> **Autor:** Yedidias Bernate
 > **Proyecto Académico:** Farmacología y Fitoquímica / Biotecnología (FPPB 2026)
+
+> **Modo demostración.** El repositorio se distribuye sin la base de datos; esta se
+> construye con `scripts/prepare_data.py`. Sin los volcados de LOTUS/COCONUT, el único
+> índice disponible es el de **demostración** (solo *Curcuma longa*, a partir del piloto
+> real en `piloto_curcuma/`). La app lo indica con un aviso visible. Para el índice
+> completo, ejecute `python scripts/prepare_data.py --download` donde Zenodo sea
+> accesible (ver sección 3).
 
 ---
 
@@ -11,7 +18,7 @@
 
 El conocimiento tradicional y popular frecuentemente atribuye propiedades terapéuticas a diversas especies vegetales. Sin embargo, familiares, pacientes e investigadores se enfrentan a un vacío informativo crítico: la fragmentación de la evidencia científica abierta. Existen bases de datos botánicas y de productos naturales que recopilan qué metabolitos posee una planta, repositorios químicos que albergan bioactividades frente a proteínas humanas, y recursos biomédicos que mapean dichas proteínas a rutas celulares y cascadas de señalización. Históricamente, un estudiante o investigador debía consultar estas fuentes de forma aislada y manual.
 
-**Conoce tu planta (v1)** surge como una solución computacional académica que unifica estos cuatro grandes repositorios abiertos (**LOTUS**, **COCONUT**, **ChEMBL** y **Reactome**) en una plataforma web ágil, rigurosa y transparente. La aplicación permite:
+**FitoEvidencia** surge como una solución computacional académica que unifica estos cuatro grandes repositorios abiertos (**LOTUS**, **COCONUT**, **ChEMBL** y **Reactome**) en una plataforma web ágil, rigurosa y transparente. La aplicación permite:
 - Cruzar sistemáticamente desde la planta hasta sus compuestos, blancos proteicos humanos y vías biológicas enriquecidas.
 - Realizar búsquedas inversas desde una molécula hacia las plantas que la contienen y sus blancos diana.
 - Rastrear desde un blanco terapéutico (ej. `PTGS2` / COX-2) o proceso biológico ("inflamación", "apoptosis") hacia las moléculas bioactivas y especies vegetales de origen.
@@ -96,12 +103,37 @@ venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### Paso 2: Preparación del índice de datos locales (Comando único)
-Para generar o reconstruir la base de datos indexada `data/natural_products.db` a partir de los datos fuente:
+### Paso 2: Construir el índice de datos locales
+
+La base `data/natural_products.db` **no** se versiona; se construye con el script de
+preparación. Hay dos modos:
+
+**(a) Índice completo (recomendado para uso real):**
 ```bash
-python scripts/prepare_data.py
+python scripts/prepare_data.py --download
 ```
-*Nota:* Si la base `data/natural_products.db` ya se encuentra presente en el directorio, este paso puede omitirse para ejecución inmediata.
+Descarga los volcados de LOTUS (Zenodo) y COCONUT, los ingiere y verifica el índice.
+Requiere acceso de red a Zenodo y al bucket de COCONUT. Si los volcados faltan y no se
+pasa `--download`, el script **falla de forma explícita** (no construye una base parcial
+en silencio).
+
+**(b) Índice de demostración (solo *Curcuma longa*):**
+```bash
+python scripts/prepare_data.py --demo
+```
+Construye un índice mínimo a partir del piloto real en `piloto_curcuma/`. Las demás
+especies semilla quedan reconocidas pero **sin datos** (estado honesto: Puntaje 0). La
+app muestra un aviso de "modo demostración".
+
+Opcional, para traducir nombres de rutas de Reactome al español (capa asistida):
+```bash
+python scripts/build_pathways_es.py        # genera data/pathways_es.json
+```
+
+Comprobación rápida del índice construido:
+```bash
+python scripts/smoke_test_index.py
+```
 
 ### Paso 3: Iniciar la aplicación web (Comando único)
 ```bash
@@ -115,9 +147,15 @@ La aplicación abrirá automáticamente la interfaz web en su navegador predeter
 
 El aplicativo cuenta con tres pestañas especializadas orientadas a facilitar la exploración tanto para estudiantes y docentes como para investigadores fitoquímicos:
 
+> **Nota sobre la interfaz (v1.1).** Los buscadores inician **vacíos** con texto guía;
+> al escribir (desde 2 caracteres) aparecen **sugerencias de autocompletado** tomadas del
+> índice real, de modo que elegir una sugerencia nunca lleva a un callejón sin datos. Se
+> retiraron los botones de ejemplo y el botón de "identificación por foto".
+
 ### Modo 1: Búsqueda por Planta (Exploración Fitoquímica Completa)
-- **Entrada amigable:** Acepta nombres científicos en latín con o sin autoría botánica (ej. *"Curcuma longa L."*, *"Curcuma domestica"*), variantes con errores tipográficos comunes (*"curcuma lnog"*) o nombres vernáculos en español e inglés (*"cúrcuma"*, *"turmeric"*, *"yacón"*, *"manzanilla"*, *"ajo"*).
-- **Tarjeta taxonómica de confirmación:** Presenta el nombre científico aceptado, autor botánico, familia, nombres comunes, fotografía representativa y botón reservado para identificación fotográfica (v2.0).
+- **Entrada amigable con autocompletado:** Acepta nombres científicos en latín con o sin autoría botánica (ej. *"Curcuma longa L."*, *"Curcuma domestica"*), variantes con errores tipográficos y nombres vernáculos en español e inglés. Las sugerencias muestran familia y número de compuestos disponibles.
+- **Tarjeta taxonómica de confirmación:** Presenta el nombre científico aceptado, familia y nombres comunes. (No se muestran fotografías: las URLs fijas anteriores podían corresponder a otra especie; una futura versión puede traerlas de GBIF en tiempo de ejecución con atribución.)
+- **Estados vacíos honestos:** nombre no reconocido; planta reconocida pero sin compuestos en el índice (Puntaje 0 y el recordatorio "sin datos no significa sin efecto"); o compuestos hallados sin coincidencia en ChEMBL.
 - **Embudo de datos interactivo:** Muestra la reducción progresiva desde registros crudos hasta vías enriquecidas.
 - **Tabla de metabolitos secundarios:** Ordenada por número de referencias bibliográficas de soporte, indicando coincidencia en ChEMBL, propiedades de similitud farmacológica (Regla de Lipinski, QED) y número de blancos proteicos.
 - **Grafo de red tripartito:** Visualización interactiva Planta $\to$ Moléculas $\to$ Blancos Proteicos con detección de dominancia.
@@ -125,14 +163,15 @@ El aplicativo cuenta con tres pestañas especializadas orientadas a facilitar la
 - **Desglose del Puntaje de Cobertura de Datos:** Evaluación de los 5 componentes metodológicos.
 
 ### Modo 2: Búsqueda por Molécula (Fitoquímica Inversa)
-- **Autodetección inteligente de formato:** Reconoce de manera automática si la entrada es un nombre común o sinónimo (*"Curcumina"*, *"Quercetina"*), una estructura SMILES (`COc1cc(C=CC(=O)CC(=O)C=Cc2ccc(O)c(OC)c2)ccc1O`), una clave InChIKey completa (`VFLDPWHFBUODDF-FCXRPNKRSA-N`), su esqueleto plano de primer bloque (`VFLDPWHFBUODDF`) o un identificador ChEMBL (`CHEMBL140`).
+- **Autodetección inteligente de formato:** Reconoce nombre o sinónimo, estructura SMILES (**validada y convertida a InChIKey con RDKit**), InChIKey completa (`VFLDPWHFBUODDF-FCXRPNKRSA-N`), esqueleto de primer bloque (`VFLDPWHFBUODDF`) o identificador ChEMBL (`CHEMBL140`). Las estructuras SMILES ahora sí se resuelven (antes se detectaban pero no se convertían).
+- **Visualizaciones primero, tablas después:** gráficos de plantas fuente, de potencia por blanco (una marca por medición, sin promediar réplicas) y de rutas; las tablas completas quedan en un desplegable "Ver datos".
 - **Renderizado estructural 2D:** Dibuja el diagrama químico vectorial nítido (SVG) mediante RDKit.
 - **Especies vegetales que la contienen:** Consulta reversa en LOTUS y COCONUT agrupando por variantes estereoquímicas.
 - **Perfil de afinidad proteica y rutas:** Lista de dianas humanas con mediciones normalizadas y vías de Reactome vinculadas.
 
 ### Modo 3: Búsqueda por Proteína o Proceso Biológico
 - **Sub-modo Proteína:** Búsqueda por símbolo genético oficial (ej. `PTGS2`, `EGFR`, `TNF`, `ESR1`) o nombre descriptivo (*"Prostaglandin G/H synthase 2"*).
-- **Sub-modo Proceso Biológico:** Búsqueda de vías curadas en Reactome mediante términos en español o inglés (*"inflamación"*, *"apoptosis"*, *"ciclo celular"*, *"senescencia"*, *"metabolismo"*).
+- **Sub-modo Proceso Biológico:** Búsqueda de vías de Reactome mediante términos en español o inglés (*"inflamación"*, *"apoptosis"*, *"ciclo celular"*). Si el término es una **enfermedad o condición clínica** (p. ej. "migraña"), la herramienta responde con honestidad que busca procesos biológicos, no enfermedades, y ofrece rutas de nombre cercano en vez de inventar un vínculo. Del proceso se recorre el pipeline real: ruta → participantes → blancos ChEMBL → moléculas → plantas del índice.
 - **Filtro botánico:** Conmutador (*toggle*) para mostrar *"Solo moléculas con planta fuente reportada"*, excluyendo compuestos puramente sintéticos de laboratorio.
 - **Control de potencia interactivo:** Deslizador dinámico de afinidad mínima ($p\text{ChEMBL} \ge 6.0$, equivalente a $IC_{50} \le 1\,\mu\text{M}$) para aislar moduladores moleculares de alta potencia.
 
@@ -168,21 +207,24 @@ $$\text{Puntaje}(Curcuma) = 100 \times (0.10\cdot 1.00 + 0.20\cdot 0.58 + 0.30\c
 
 ## 6. Evaluación y Selección de la Planta Poco Estudiada
 
-Conforme al hito M6 y al requisito R6, se evaluaron sistemáticamente cuatro especies vegetales candidatas de la medicina tradicional latinoamericana utilizando los datos reales de la plataforma:
+El requisito R6 pide validar la plataforma con una planta bien estudiada y otra poco
+estudiada, **usando datos reales**. La versión v1 incluía una tabla con un puntaje de
+29.2 para *Smallanthus sonchifolius* (Yacón) calculado a partir de **4 compuestos
+escritos a mano**, no reales. Esas filas fabricadas se eliminaron (ver la revisión).
 
-### Tabla Comparativa de Candidatas Evaluadas
+Por tanto, **la selección definitiva de la planta poco estudiada queda pendiente** hasta
+construir el índice completo (`python scripts/prepare_data.py --download`). En el índice
+de demostración, las especies candidatas (*Smallanthus sonchifolius*, *Petiveria
+alliacea*, *Dysphania ambrosioides*) aparecen como **organismos reconocidos sin datos**
+(Puntaje 0), que es el estado honesto previsto por el diseño.
 
-| Especie Científica | Nombre Común | Familia Botánica | Compuestos ($N$) | Esqueletos Únicos | Coincidencias ChEMBL | Actividades $IC_{50}/K_i$ | Blancos Proteicos | Vías Reactome | Puntaje de Cobertura | Estado y Decisión |
-|---|---|---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|---|
-| ***Smallanthus sonchifolius*** | **Yacón** | **Asteraceae** | **4** | **4** | **1** | **12** | **7** | **15** | **29.2 / 100** | **SELECCIONADA (Modelo óptimo poco estudiado)** |
-| *Petiveria alliacea* | Anamú | Petiveriaceae | 3 | 3 | 3 | 2 | 2 | 15 | 18.0 / 100 | Validación secundaria |
-| *Dysphania ambrosioides* | Epazote | Amaranthaceae | 3 | 3 | 2 | 0 | 0 | 0 | 3.0 / 100 | Evidencia fitoquímica sin bioactividad |
-| *Montanoa tomentosa* | Zoapatle | Asteraceae | 0 | 0 | 0 | 0 | 0 | 0 | 0.0 / 100 | Sin metabolitos en LOTUS/COCONUT |
-
-### Justificación de la Selección de *Smallanthus sonchifolius* (Yacón)
-1. **Recorrido completo del embudo molecular:** Posee 4 metabolitos caracterizados que conectan con ChEMBL (1 coincidencia con 12 mediciones farmacológicas exactas), resolviendo 7 blancos proteicos humanos y 15 vías biológicas en Reactome.
-2. **Representatividad de baja cobertura sin colapso:** Con un puntaje de **29.2 / 100** ($< 30.0$), refleja de manera fidedigna el estado de una planta con investigación fitoquímica incipiente, contrastando nítidamente con los 60.0 puntos de *Curcuma longa*.
-3. **Ausencia de dominancia artificial masiva:** Al contar con 7 blancos bien distribuidos, permite demostrar el comportamiento del sistema sin el sesgo extremo de un único compuesto híper-investigado.
+Procedimiento reproducible una vez ingeridos los datos reales:
+```bash
+python scripts/prepare_data.py --download
+python scripts/smoke_test_index.py   # reporta compuestos por especie
+```
+Con esos números reales se actualizará esta tabla, `AGENTS.md` y
+`app/tests/test_under_studied_plant.py`.
 
 ---
 
@@ -193,16 +235,16 @@ Uno de los pilares metodológicos del proyecto es no ocultar las limitaciones in
 1. **Aviso Obligatorio de Evidencia Preclínica:**  
    Todas las pantallas de resultados incluyen una advertencia visible y explícita:  
    > *Los resultados presentados corresponden a evidencia molecular preclínica (ensayos in vitro e in silico de laboratorio). No constituyen evidencia de eficacia clínica en humanos ni recomendación médica bajo ninguna circunstancia. Ninguna pantalla afirma que una planta cure o trate enfermedad alguna.*
-2. **Alerta de Dominancia por una Sola Molécula:**  
-   En especies altamente investigadas como *Curcuma longa*, la **curcumina** aporta 85 de los 140 blancos proteicos (**60.7%** del total de la planta). Si no se advierte, el usuario asumiría que la planta completa modula esas 140 dianas. El aplicativo detecta cuando una molécula aporta $\ge 40\%$ de los blancos y despliega una alerta visual destacando los blancos específicos por metabolito.
+2. **Alerta de Dominancia por una Sola Molécula:**
+   El aplicativo detecta cuando un único compuesto aporta $\ge 40\%$ de los blancos medidos de la planta y despliega una alerta ("Aviso de dominancia") con el porcentaje real calculado al vuelo. Por ejemplo, en *Curcuma longa* la curcumina concentra la mayoría de las dianas; el porcentaje exacto lo computa el sistema sobre los datos cargados, no un valor fijo escrito en el código.
 3. **Sesgo por Paneles de Ensayo (Anhidrasa Carbónica):**  
    Artículos de tamizaje químico que prueban colecciones completas de isoformas de anhidrasa carbónica (CA I a CA XIV) inflan artificialmente el enriquecimiento estadístico en Reactome con valores de significancia anómalos ($\text{FDR} \approx 10^{-13}$). La plataforma incorpora una advertencia contextual sobre este artefacto y ofrece filtros de afinidad estricta ($p\text{ChEMBL} \ge 6.0$) para mitigar su efecto.
 4. **Alerta de Afinidades Extremas:**  
    Mediciones sub-nanomolares excepcionales ($p\text{ChEMBL} \ge 9.0$, ej. afinidad reportada de curcumina frente a precursor amiloide $\beta$ con $p\text{ChEMBL} = 9.68 \approx 0.2\,\text{nM}$) se señalan con enlaces directos al identificador del ensayo en ChEMBL para su verificación por el investigador.
 5. **Agrupación por Esqueleto Químico (Bloque 1 de InChIKey):**  
    Para resolver redundancias y rescatar variantes estereoquímicas o tautoméricas entre LOTUS y ChEMBL, la búsqueda agrupa estructuras por los primeros 14 caracteres del InChIKey. El usuario es notificado de que esta agrupación consolida enantiómeros y estereoisómeros.
-6. **Módulo de Fotografía (Próximamente para v2.0):**  
-   La identificación taxonómica visual mediante redes neuronales convolucionales o APIs botánicas (Pl@ntNet) se presenta de forma transparente como un botón informativo inactivo (*placeholder*), programado para la versión 2.0.
+6. **Nombres de rutas en español (traducción asistida):**
+   Reactome publica los nombres solo en inglés y R2 prohíbe servicios externos en tiempo de ejecución, por lo que la traducción se genera en tiempo de construcción (`scripts/build_pathways_es.py` → `data/pathways_es.json`) y se marca como "traducción asistida". El nombre original en inglés y el `stId` se conservan y aparecen en el detalle y en las exportaciones. El sesgo del panel de anhidrasa carbónica se detecta por `stId` (R-HSA-1475029), de modo que la alerta sigue funcionando tras traducir.
 
 ---
 
@@ -211,22 +253,28 @@ Uno de los pilares metodológicos del proyecto es no ocultar las limitaciones in
 El proyecto cuenta con una cobertura integral de pruebas automatizadas construida con `pytest`, que valida desde la integridad de índices y tolerancia a errores hasta la reproducción exacta de los datos piloto y el rendimiento temporal:
 
 ```bash
-# Ejecutar la suite completa de pruebas
-python -m pytest app/tests/ -v
+# Suite completa sin red (rápida)
+python -m pytest app/tests/ -m "not network"
+
+# Incluir las pruebas que consultan ChEMBL / Reactome / GBIF
+python -m pytest app/tests/
 ```
 
-### Resultados de la Verificación de Calidad
-- **Aprobación de pruebas:** 100% de pruebas aprobadas (228+ pruebas unitarias, de integración, adversariales y de interfaz headless).
-- **Rendimiento de búsqueda en frío (*Curcuma longa* con caché cálido):**
-  - **Latencia total del pipeline:** **0.293 segundos** (ampliamente inferior al límite obligatorio de 10.0 s y al objetivo de 3.0 s).
-  - **Consulta SQLite local de compuestos:** 4.39 ms (umbral < 500 ms).
-  - **Búsqueda reversa molécula $\to$ plantas:** 3.42 ms (umbral < 500 ms).
-  - **Autocompletado de especies y compuestos:** ~6 ms (umbral < 200 ms).
-- **Verificación de sintaxis y compilación:**
+### Enfoque de pruebas (reescrito)
+Las pruebas ahora **importan y ejecutan las funciones reales de la app** y corren
+`app/main.py` mediante `AppTest`, en vez de validar implementaciones de referencia
+copiadas dentro de los propios tests. Puntos clave:
+- Una **compuerta de honestidad** (`test_honesty_gate.py`) falla si reaparece contenido
+  fijo/fabricado o ramas que tratan de forma especial a una entidad del piloto
+  (CHEMBL140, VFLDPWHFBUODDF, etc.) dentro de `app/components` o `app/core`.
+- Las pruebas que tocan red llevan la marca `network` (desactívelas con `-m "not network"`).
+- Un índice en modo demostración no se reporta como validación completa: las pruebas de
+  planta poco estudiada verifican el **estado vacío honesto**, no un puntaje fabricado.
+
+Verificación de compilación:
 ```bash
-python -m py_compile app/main.py scripts/prepare_data.py app/core/*.py app/components/*.py
+python -m py_compile app/main.py scripts/*.py app/core/*.py app/components/*.py
 ```
-Compilación limpia sin advertencias de sintaxis.
 
 ---
 

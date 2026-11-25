@@ -39,7 +39,7 @@ def render_dominance_alert(dominance: dict[str, Any]) -> None:
     if is_dom or pct >= 40.0:
         total_str = f" ({top_cnt}/{total_cnt})" if total_cnt > 0 else ""
         msg = (
-            f"Aviso de sesgo: El compuesto {top_mol} concentra el {pct:.1f}% "
+            f"Aviso de dominancia: El compuesto {top_mol} concentra el {pct:.1f}% "
             f"de las dianas identificadas{total_str}."
         )
         st.warning(msg)

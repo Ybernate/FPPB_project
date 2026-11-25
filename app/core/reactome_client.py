@@ -201,18 +201,8 @@ def _preload_pilot_data() -> None:
             except Exception as e:
                 logger.warning("Failed preloading rutas.csv: %s", e)
 
-        # Preload well-known pathway participants
-        _PILOT_PARTICIPANTS["R-HSA-1475029"] = [
-            "P00915", "P00918", "P07451", "P22748", "P35218",
-            "P23280", "P43166", "Q16790", "O43570", "Q9ULX7",
-        ]  # Carbonic Anhydrase pathway
-        _PILOT_PARTICIPANTS["R-HSA-109581"] = [
-            "P04637", "P42574", "P25963", "P00533", "P35354"
-        ]  # Apoptosis
-        _PILOT_PARTICIPANTS["R-HSA-1430728"] = [
-            "P35354", "P00918", "P15121", "O60218"
-        ]  # Metabolism
-
+        # No hard-coded participant lists (review X1): participants are fetched live
+        # from Reactome's ContentService and cached per pathway on first use.
         _pilot_preloaded = True
 
 
@@ -265,16 +255,6 @@ def get_pathway_enrichment(
             "token": None,
             "not_found_count": 0,
             "total_targets": 0,
-        }
-
-    # Pilot Curcuma longa fast-path (sub-millisecond reproduction of pilot slide numbers)
-    # 140 unique targets in pilot; 8 not found in Reactome -> 132 found
-    if len(clean_ids) >= 120 and "P35354" in clean_ids and _PILOT_PATHWAYS:
-        return {
-            "pathways": list(_PILOT_PATHWAYS[:page_size]),
-            "token": _PILOT_SUMMARY.get("reactome_token", "MjAyNjEwMTMwMTIyMTFfMjUzNzA%3D"),
-            "not_found_count": _PILOT_SUMMARY.get("reactome_not_found", 8),
-            "total_targets": len(clean_ids),
         }
 
     id_hash = str(hash(",".join(clean_ids)))
@@ -358,16 +338,17 @@ def get_pathway_enrichment(
 
                 return result
     except Exception as exc:
-        logger.warning("Reactome AnalysisService request failed: %s. Using fallback.", exc)
+        logger.warning("Reactome AnalysisService request failed: %s.", exc)
 
-    # Graceful fallback on network error or offline mode
-    fallback_result = {
-        "pathways": list(_PILOT_PATHWAYS[:page_size]) if _PILOT_PATHWAYS else [],
-        "token": _PILOT_SUMMARY.get("reactome_token", "OFFLINE_TOKEN"),
+    # On network error, return an honest empty result rather than fabricating
+    # pilot pathways for an unrelated query (review X1).
+    return {
+        "pathways": [],
+        "token": None,
         "not_found_count": 0,
         "total_targets": len(clean_ids),
+        "error": "No se pudo contactar a Reactome AnalysisService.",
     }
-    return fallback_result
 
 
 def search_pathways_by_keyword(
@@ -396,15 +377,6 @@ def search_pathways_by_keyword(
         cached = _get_from_cache(cache_key, db_path=db_path)
         if cached is not None:
             return list(cached)
-
-    # Check preloaded pilot pathways
-    matched_preloaded = [
-        {"stId": p["stId"], "name": p["name"]}
-        for p in _PILOT_PATHWAYS
-        if translated.lower() in p["name"].lower()
-    ]
-    if matched_preloaded:
-        return matched_preloaded
 
     species_param = urllib.parse.quote(species)
     q_param = urllib.parse.quote(translated)
@@ -443,30 +415,10 @@ def search_pathways_by_keyword(
             logger.warning("HTTP %d error querying Reactome ContentService for '%s'", he.code, q)
             results = []
     except Exception as e:
+        # On network failure return nothing — never fabricate pathway results
+        # (review X1/V9). The caller surfaces an honest "no se pudo consultar" message.
         logger.warning("Network failure querying Reactome ContentService: %s", e)
-        # Built-in fallback for common keywords
-        if "inflam" in translated.lower():
-            results = [
-                {"stId": "R-HSA-168898", "name": "Innate Immune System"},
-                {"stId": "R-HSA-168249", "name": "Toll-like Receptor Cascades"},
-            ]
-        elif "apopt" in translated.lower():
-            results = [
-                {"stId": "R-HSA-109581", "name": "Apoptosis"},
-                {"stId": "R-HSA-5357801", "name": "Programmed Cell Death"},
-            ]
-        elif "metabol" in translated.lower():
-            results = [
-                {"stId": "R-HSA-1430728", "name": "Metabolism"},
-                {"stId": "R-HSA-71291", "name": "Metabolism of amino acids and derivatives"},
-            ]
-        elif "cancer" in translated.lower():
-            results = [
-                {"stId": "R-HSA-1214187", "name": "Signaling by NOTCH"},
-                {"stId": "R-HSA-5357801", "name": "Programmed Cell Death"},
-            ]
-        else:
-            results = []
+        results = []
 
     if use_cache:
         _save_to_cache(cache_key, "/ContentService/search/query", results, db_path=db_path)
@@ -492,10 +444,6 @@ def get_pathway_participants(
     clean_id = st_id.strip()
     if not clean_id:
         return []
-
-    # 1. Check in-memory preloaded participants
-    if clean_id in _PILOT_PARTICIPANTS:
-        return list(_PILOT_PARTICIPANTS[clean_id])
 
     cache_key = f"reactome:participants:{clean_id}"
     if use_cache:
@@ -538,3 +486,106 @@ def get_pathway_participants(
         _save_to_cache(cache_key, "/ContentService/data/participants/referenceEntities", results, db_path=db_path)
 
     return results
+
+
+# ---------------------------------------------------------------------------
+# Spanish translation layer (review V5)
+# ---------------------------------------------------------------------------
+# Pathway names are English-only in Reactome, and runtime calls to external
+# translation services are forbidden (R2). Translations are therefore built at
+# prepare_data time into data/pathways_es.json (keyed by stId) and loaded here.
+# Gene/protein symbols inside names are kept untouched.
+
+PATHWAYS_ES_PATH = PROJECT_ROOT / "data" / "pathways_es.json"
+
+# The carbonic-anhydrase panel-bias pathway, detected by stId so it keeps working
+# after translation (review V5 dependency / V6).
+CA_PATHWAY_STID = "R-HSA-1475029"
+
+_pathways_es: dict[str, str] = {}
+_pathways_es_loaded = False
+
+
+def _load_pathways_es() -> dict[str, str]:
+    """Loads the stId -> Spanish-name translation table once, tolerating absence."""
+    global _pathways_es_loaded
+    if _pathways_es_loaded:
+        return _pathways_es
+    with _lock:
+        if _pathways_es_loaded:
+            return _pathways_es
+        if PATHWAYS_ES_PATH.exists():
+            try:
+                with open(PATHWAYS_ES_PATH, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                # Accept either {stId: name_es} or {stId: {"es": ..., "en": ...}}.
+                for st_id, val in data.items():
+                    if isinstance(val, dict):
+                        name = val.get("es")
+                    else:
+                        name = val
+                    if name:
+                        _pathways_es[st_id] = name
+            except Exception as e:
+                logger.warning("Failed loading pathways_es.json: %s", e)
+        _pathways_es_loaded = True
+    return _pathways_es
+
+
+def translate_pathway_name(name_or_stid: str, st_id: str = "") -> str:
+    """Returns the Spanish pathway name when available, else the original English name.
+
+    Pass the stId when known for a reliable lookup; otherwise the English name is
+    returned unchanged (graceful degradation when no translation exists).
+    """
+    table = _load_pathways_es()
+    if st_id and st_id in table:
+        return table[st_id]
+    # name_or_stid may itself be an stId.
+    if name_or_stid in table:
+        return table[name_or_stid]
+    return name_or_stid
+
+
+def is_ca_panel_pathway(pathway: dict[str, Any]) -> bool:
+    """Detects the carbonic-anhydrase panel-bias pathway by stId (review V5/V6).
+
+    Detecting by stId keeps the honesty flag working after Spanish translation,
+    unlike the previous English-substring check.
+    """
+    return str(pathway.get("stId") or pathway.get("id") or "") == CA_PATHWAY_STID
+
+
+def search_pathways(keyword: str) -> dict[str, Any]:
+    """Honest process search (review V9).
+
+    Returns {"pathways": [...], "near_matches": [str, ...]}. A clinical condition or
+    an unknown term yields an empty ``pathways`` list and, when possible, a few
+    near-match pathway names from the live search — never an invented link and never
+    a condition->pathway mapping.
+    """
+    q = keyword.strip()
+    if not q:
+        return {"pathways": [], "near_matches": []}
+
+    results = search_pathways_by_keyword(q)
+    translated = normalize_keyword(q).lower()
+
+    # Keep only pathways whose name shares a whole word with the (translated) query,
+    # so fuzzy stem matches like 'migraña' -> 'migration' are rejected.
+    query_words = {w for w in translated.replace("-", " ").split() if len(w) >= 4}
+    strong: list[dict[str, Any]] = []
+    weak: list[dict[str, Any]] = []
+    for p in results:
+        name_words = {w.lower() for w in p.get("name", "").replace("-", " ").split()}
+        if query_words & name_words:
+            strong.append(p)
+        else:
+            weak.append(p)
+
+    if strong:
+        return {"pathways": strong, "near_matches": []}
+
+    # No strong match: offer weak ones only as "did you mean" names, not as results.
+    near = [p.get("name", "") for p in weak[:5] if p.get("name")]
+    return {"pathways": [], "near_matches": near}

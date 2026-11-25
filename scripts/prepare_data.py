@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import datetime
 import gzip
 import io
 import os
@@ -165,7 +166,17 @@ def init_db(db_path: Path, force: bool = False) -> sqlite3.Connection:
     )
     cur.execute("CREATE INDEX IF NOT EXISTS idx_cache_endpoint ON api_cache(endpoint);")
 
-    # 6. Backward-compatibility view for natural_products
+    # 6. Build provenance table (records how this index was built)
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS build_info (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        );
+        """
+    )
+
+    # 7. Backward-compatibility view for natural_products
     cur.execute(
         """
         CREATE VIEW IF NOT EXISTS natural_products AS 
@@ -191,97 +202,6 @@ def init_db(db_path: Path, force: bool = False) -> sqlite3.Connection:
     return conn
 
 
-def seed_verified_pilot_and_curated(conn: sqlite3.Connection) -> None:
-    """Seeds verified pilot data for Curcuma longa and key validation species."""
-    print("[*] Seeding verified pilot data and key validation plants...")
-    cur = conn.cursor()
-
-    # Define primary species
-    species_to_seed = [
-        {
-            "canonical_name": "Curcuma longa",
-            "family": "Zingiberaceae",
-            "gbif_id": 2757679,
-            "synonyms": [
-                ("cúrcuma", "es"),
-                ("curcuma", "es"),
-                ("turmeric", "en"),
-                ("azafrán de la india", "es"),
-                ("Curcuma domestica", "latin"),
-                ("Curcuma longa L.", "latin"),
-            ],
-        },
-        {
-            "canonical_name": "Zingiber officinale",
-            "family": "Zingiberaceae",
-            "gbif_id": 2757280,
-            "synonyms": [
-                ("jengibre", "es"),
-                ("ginger", "en"),
-                ("Zingiber officinale Roscoe", "latin"),
-            ],
-        },
-        {
-            "canonical_name": "Smallanthus sonchifolius",
-            "family": "Asteraceae",
-            "gbif_id": 3131015,
-            "synonyms": [
-                ("yacón", "es"),
-                ("yacon", "en"),
-                ("polymnia sonchifolia", "latin"),
-            ],
-        },
-        {
-            "canonical_name": "Petiveria alliacea",
-            "family": "Petiveriaceae",
-            "gbif_id": 3083508,
-            "synonyms": [
-                ("anamú", "es"),
-                ("anamu", "es"),
-                ("guinea henweed", "en"),
-                ("Petiveria alliacea L.", "latin"),
-            ],
-        },
-        {
-            "canonical_name": "Dysphania ambrosioides",
-            "family": "Amaranthaceae",
-            "gbif_id": 3083973,
-            "synonyms": [
-                ("paico", "es"),
-                ("epazote", "es"),
-                ("chenopodium ambrosioides", "latin"),
-                ("mexican tea", "en"),
-            ],
-        },
-    ]
-
-    org_ids = {}
-    for sp in species_to_seed:
-        c_name = sp["canonical_name"]
-        clean = normalize_clean(c_name)
-        cur.execute(
-            """
-            INSERT OR IGNORE INTO organisms (canonical_name, clean_name, family, gbif_id, is_plant)
-            VALUES (?, ?, ?, ?, 1)
-            """,
-            (c_name, clean, sp["family"], sp["gbif_id"]),
-        )
-        cur.execute("SELECT organism_id FROM organisms WHERE canonical_name = ?", (c_name,))
-        row = cur.fetchone()
-        org_id = row[0]
-        org_ids[c_name] = org_id
-
-        # Insert synonyms
-        for syn, lang in sp["synonyms"]:
-            cur.execute(
-                """
-                INSERT OR IGNORE INTO synonyms (entity_type, entity_key, synonym, clean_synonym, language)
-                VALUES ('PLANT', ?, ?, ?, ?)
-                """,
-                (str(org_id), syn, normalize_clean(syn), lang),
-            )
-
-    # 1. Load Curcuma longa from piloto_curcuma/compuestos.csv
 def _flush_batches(
     cur: sqlite3.Cursor,
     comp_inserts: list[tuple],
@@ -362,7 +282,7 @@ def seed_verified_pilot_and_curated(conn: sqlite3.Connection) -> None:
         {
             "canonical_name": "Curcuma longa",
             "family": "Zingiberaceae",
-            "gbif_id": 2757679,
+            "gbif_id": 2757624,
             "synonyms": [
                 ("cúrcuma", "es"),
                 ("curcuma", "es"),
@@ -385,7 +305,7 @@ def seed_verified_pilot_and_curated(conn: sqlite3.Connection) -> None:
         {
             "canonical_name": "Smallanthus sonchifolius",
             "family": "Asteraceae",
-            "gbif_id": 3131015,
+            "gbif_id": 3103233,
             "synonyms": [
                 ("yacón", "es"),
                 ("yacon", "en"),
@@ -395,7 +315,7 @@ def seed_verified_pilot_and_curated(conn: sqlite3.Connection) -> None:
         {
             "canonical_name": "Petiveria alliacea",
             "family": "Petiveriaceae",
-            "gbif_id": 3083508,
+            "gbif_id": 3083981,
             "synonyms": [
                 ("anamú", "es"),
                 ("anamu", "es"),
@@ -406,7 +326,7 @@ def seed_verified_pilot_and_curated(conn: sqlite3.Connection) -> None:
         {
             "canonical_name": "Dysphania ambrosioides",
             "family": "Amaranthaceae",
-            "gbif_id": 3083973,
+            "gbif_id": 3084126,
             "synonyms": [
                 ("paico", "es"),
                 ("epazote", "es"),
@@ -457,14 +377,26 @@ def seed_verified_pilot_and_curated(conn: sqlite3.Connection) -> None:
         occurrence_inserts = []
         synonym_inserts = []
 
-        prop_map = {
-            "VFLDPWHFBUODDF-FCXRPNKRSA-N": {"mw": 368.38, "alogp": 3.2, "tpsa": 93.06, "qed": 0.55},
-            "PREBVFJICNPEKM-YDWXAUTNSA-N": {"mw": 308.33, "alogp": 3.1, "tpsa": 72.83, "qed": 0.62},
-            "HJTVQHVGMGKONQ-LUZURFALSA-N": {"mw": 338.35, "alogp": 3.15, "tpsa": 82.94, "qed": 0.58},
-            "NAAJVHHFAXWBOK-ZDUSSCGKSA-N": {"mw": 218.33, "alogp": 3.8, "tpsa": 17.07, "qed": 0.68},
-            "KKOXKGNSUHTUBV-LSDHHAIUSA-N": {"mw": 204.35, "alogp": 5.4, "tpsa": 0.0, "qed": 0.44},
-            "GRWFGVWFFZKLTI-UHFFFAOYSA-N": {"mw": 136.23, "alogp": 3.2, "tpsa": 0.0, "qed": 0.48},
-        }
+        # Detect whether the pilot CSV carries real physicochemical/drug-likeness
+        # columns. It does not today (header: inchikey,nombre,smiles,n_refs,qid,
+        # chembl_id,chembl_nombre,n_blancos_proteina), so we insert NULL for
+        # mw/alogp/tpsa/qed rather than invent drug-likeness numbers.
+        csv_fields = set(reader.fieldnames or [])
+        mw_col = next((c for c in ("molecular_weight", "mw") if c in csv_fields), None)
+        alogp_col = "alogp" if "alogp" in csv_fields else None
+        tpsa_col = next((c for c in ("tpsa", "topological_polar_surface_area") if c in csv_fields), None)
+        qed_col = next((c for c in ("qed", "qed_drug_likeliness") if c in csv_fields), None)
+
+        def _num(row, col):
+            if not col:
+                return None
+            val = (row.get(col) or "").strip()
+            if not val:
+                return None
+            try:
+                return float(val)
+            except (ValueError, TypeError):
+                return None
 
         for row in curcuma_rows:
             ik = row["inchikey"].strip()
@@ -473,18 +405,16 @@ def seed_verified_pilot_and_curated(conn: sqlite3.Connection) -> None:
             smiles = row.get("smiles", "").strip() or None
             n_refs = int(row.get("n_refs", 1))
 
-            p = prop_map.get(ik, {"mw": None, "alogp": None, "tpsa": None, "qed": None})
-
             compound_inserts.append((
                 ik,
                 fb,
                 smiles,
                 name,
                 None,  # molecular_formula
-                p["mw"],
-                p["alogp"],
-                p["tpsa"],
-                p["qed"],
+                _num(row, mw_col),
+                _num(row, alogp_col),
+                _num(row, tpsa_col),
+                _num(row, qed_col),
                 1,  # source_flags: LOTUS
             ))
 
@@ -520,154 +450,13 @@ def seed_verified_pilot_and_curated(conn: sqlite3.Connection) -> None:
                 ])
 
         _flush_batches(cur, compound_inserts, occurrence_inserts, synonym_inserts)
-
-        # Genuine COCONUT seed records for Curcuma longa with authentic 27-character InChIKeys and DOIs
-        curated_coconut_curcuma_records = [
-            # Dual-source overlapping natural products from Curcuma longa
-            ("VFLDPWHFBUODDF-FCXRPNKRSA-N", "VFLDPWHFBUODDF", "Curcumin", "COC1=C(C=CC(=C1)/C=C/C(=O)CC(=O)/C=C/C2=CC(=C(C=C2)O)OC)O", 368.38, 3.2, 93.06, 0.55, "10.1002/ptr.3149"),
-            ("VFLDPWHFBUODDF-UHFFFAOYSA-N", "VFLDPWHFBUODDF", "Curcumin", "COC1=CC(=CC=C1O)C=CC(=O)CC(=O)C=CC2=CC(=C(C=C2)O)OC", 368.38, 3.2, 93.06, 0.55, "10.1002/ptr.3149"),
-            ("PREBVFJICNPEKM-YDWXAUTNSA-N", "PREBVFJICNPEKM", "Bisdemethoxycurcumin", "C1=CC(=CC=C1/C=C/C(=O)CC(=O)/C=C/C2=CC=C(C=C2)O)O", 308.33, 3.1, 72.83, 0.62, "10.1021/np0203028"),
-            ("HJTVQHVGMGKONQ-LUZURFALSA-N", "HJTVQHVGMGKONQ", "Desmethoxycurcumin", "COC1=C(C=CC(=C1)/C=C/C(=O)CC(=O)/C=C/C2=CC=C(C=C2)O)O", 338.35, 3.15, 82.94, 0.58, "10.1021/np0203028"),
-            ("NAAJVHHFAXWBOK-ZDUSSCGKSA-N", "NAAJVHHFAXWBOK", "(+)-(S)-ar-turmerone", "CC1=CC=C(C=C1)[C@@H](C)CC(=O)C=C(C)C", 218.33, 3.8, 17.07, 0.68, "10.1016/0031-9422(85)80036-6"),
-            ("KKOXKGNSUHTUBV-LSDHHAIUSA-N", "KKOXKGNSUHTUBV", "Zingiberene", "CC1=CCC(C=C1)[C@@H](C)CCC=C(C)C", 204.35, 5.4, 0.0, 0.44, "10.1016/0031-9422(85)80036-6"),
-            ("GRWFGVWFFZKLTI-UHFFFAOYSA-N", "GRWFGVWFFZKLTI", "alpha-pinene", "CC1=CC[C@H]2C[C@@H]1C2(C)C", 136.23, 3.2, 0.0, 0.48, "10.1016/0031-9422(85)80036-6"),
-            ("FZPYMZUVXJUAQA-UHFFFAOYSA-N", "FZPYMZUVXJUAQA", "(S)-turmerone", "CC(=O)CC(C)C1=CCC(=CC1)C", 218.33, 3.7, 17.07, 0.67, "10.1016/0031-9422(85)80036-6"),
-            ("UAHWPYUMFXYFJY-UHFFFAOYSA-N", "UAHWPYUMFXYFJY", "myrcene", "CC(=CCCC(=C)C=C)C", 136.23, 3.8, 0.0, 0.46, "10.1016/0031-9422(85)80036-6"),
-            ("WUOACPNHFRMFPN-UHFFFAOYSA-N", "WUOACPNHFRMFPN", "alpha-terpineol", "CC1=CCC(CC1)C(C)(C)O", 154.25, 2.6, 20.23, 0.58, "10.1016/0031-9422(85)80036-6"),
-            ("CRPUJAZIXJMDBK-UHFFFAOYSA-N", "CRPUJAZIXJMDBK", "camphene", "CC1(C2CCC(C2)C1=C)C", 136.23, 3.4, 0.0, 0.49, "10.1016/0031-9422(85)80036-6"),
-            # Authentic COCONUT natural products for Curcuma longa
-            ("TXIKNNOOLCGADE-OSRDXIQISA-N", "TXIKNNOOLCGADE", "Zedoarondiol", "CC(=C1C[C@H]2[C@@H](CC[C@@]2(C)O)[C@@](CC1=O)(C)O)C", 252.35, 1.6, 57.5, 0.72, "10.1021/np50021a008"),
-            ("RHBOHEXDGUVIIY-WHOFXGATSA-N", "RHBOHEXDGUVIIY", "Procurcumenol", "CC1=CC(=O)C(=C(C)C)C[C@H]2[C@H]1CC[C@]2(C)O", 234.33, 2.3, 37.3, 0.69, "10.1248/cpb.34.4075"),
-            ("HUZJLWLCLJEXEL-NFAWXSAZSA-N", "HUZJLWLCLJEXEL", "Curcumenone", "CC(=C1C[C@@H]2[C@H]([C@@]2(CC1=O)C)CCC(=O)C)C", 234.33, 2.4, 34.1, 0.70, "10.1021/np50044a023"),
-            ("ISFMXVMWEWLJGJ-NZBPQXDJSA-N", "ISFMXVMWEWLJGJ", "Curcumenol", "C[C@H]1CC[C@@H]2[C@]13CC(=C(C)C)[C@](O3)(C=C2C)O", 234.33, 2.2, 29.5, 0.68, "10.1016/0031-9422(80)87036-1"),
-            ("QRMPRVXWPCLVNI-YYFQZIEXSA-N", "QRMPRVXWPCLVNI", "Curcumol", "C[C@H]1CC[C@@H]2[C@]13C[C@H]([C@](O3)(CC2=C)O)C(C)C", 236.35, 2.8, 29.5, 0.67, "10.1248/cpb.32.3783"),
-            ("ZVMJXSJCBLRAPD-ZFWWWQNUSA-N", "ZVMJXSJCBLRAPD", "Curzerenone", "CC1=COC2=C1C(=O)[C@@H]([C@@](C2)(C)C=C)C(=C)C", 230.30, 4.0, 30.2, 0.71, "10.1248/cpb.32.3783"),
-            ("FNMDHMSGEIODFP-UHFFFAOYSA-N", "FNMDHMSGEIODFP", "Curcumadiol", "CC(C)C1=CCC(C2CCC(C2C1)(C)O)(C)O", 238.37, 2.2, 40.5, 0.68, "10.1016/0031-9422(80)87036-1"),
-        ]
-
-        coconut_comp_inserts = []
-        coconut_occ_inserts = []
-        coconut_syn_inserts = []
-
-        for ik, fb, name, smiles, mw, alogp, tpsa, qed, doi in curated_coconut_curcuma_records:
-            coconut_comp_inserts.append((ik, fb, smiles, name, None, mw, alogp, tpsa, qed, 2))
-            coconut_occ_inserts.append((
-                curcuma_org_id,
-                ik,
-                fb,
-                "COCONUT",
-                1,  # reference_count
-                0,  # lotus_refs
-                1,  # coconut_refs
-                doi,
-            ))
-            coconut_syn_inserts.append(("COMPOUND", ik, name, normalize_clean(name), "en"))
-
-        # Merge COCONUT records into database
-        _flush_batches(cur, coconut_comp_inserts, coconut_occ_inserts, coconut_syn_inserts)
-
-    # 2. Seed Zingiber officinale (Ginger) with authentic InChIKeys and DOIs
-    ginger_org_id = org_ids["Zingiber officinale"]
-    ginger_compounds = [
-        ("XQZDFNJHACJHID-UHFFFAOYSA-N", "XQZDFNJHACJHID", "[6]-gingerol", "CCCCCC(O)CC(=O)CCc1ccc(O)c(OC)c1", 294.39, 3.1, 57.5, 0.68, 12, "LOTUS, COCONUT", "10.1021/np50021a008"),
-        ("RCDPAGKZNVPJSK-UHFFFAOYSA-N", "RCDPAGKZNVPJSK", "[6]-shogaol", "CCCCCC=CCC(=O)CCc1ccc(O)c(OC)c1", 276.37, 3.8, 37.3, 0.65, 8, "LOTUS, COCONUT", "10.1021/np50021a008"),
-        ("GQBAUMHGZZSSNS-UHFFFAOYSA-N", "GQBAUMHGZZSSNS", "zingerone", "COc1cc(ccc1O)CCC(=O)C", 194.23, 1.4, 37.3, 0.74, 15, "LOTUS, COCONUT", "10.1021/np50021a008"),
-        ("KKOXKGNSUHTUBV-LSDHHAIUSA-N", "KKOXKGNSUHTUBV", "zingiberene", "C1=CC(CC=C1C)C(C)CCC=C(C)C", 204.35, 5.4, 0.0, 0.44, 14, "LOTUS, COCONUT", "10.1016/0031-9422(85)80036-6"),
-        ("VFLDPWHFBUODDF-FCXRPNKRSA-N", "VFLDPWHFBUODDF", "curcumin", "COC1=C(C=CC(=C1)C=CC(=O)CC(=O)C=CC2=CC(=C(C=C2)O)OC)O", 368.38, 3.2, 93.06, 0.55, 3, "LOTUS, COCONUT", "10.1002/ptr.3149"),
-    ]
-    for ik, fb, name, smiles, mw, alogp, tpsa, qed, refs, sdb, doi in ginger_compounds:
-        flags = 3 if "COCONUT" in sdb and "LOTUS" in sdb else (1 if "LOTUS" in sdb else 2)
-        cur.execute(
-            """
-            INSERT INTO compounds (
-                inchikey, inchikey_block1, smiles, name, molecular_weight, alogp, tpsa, qed, source_flags
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(inchikey) DO UPDATE SET
-                source_flags = compounds.source_flags | excluded.source_flags,
-                name = COALESCE(compounds.name, excluded.name),
-                smiles = COALESCE(compounds.smiles, excluded.smiles)
-            """,
-            (ik, fb, smiles, name, mw, alogp, tpsa, qed, flags),
-        )
-        cur.execute(
-            """
-            INSERT OR REPLACE INTO occurrences (
-                organism_id, inchikey, inchikey_block1, source_db, reference_count, lotus_ref_count, coconut_ref_count, reference_dois
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (ginger_org_id, ik, fb, sdb, refs, refs, 1 if "COCONUT" in sdb else 0, doi),
-        )
-        cur.execute(
-            """
-            INSERT OR IGNORE INTO synonyms (entity_type, entity_key, synonym, clean_synonym, language)
-            VALUES ('COMPOUND', ?, ?, ?, 'en')
-            """,
-            (ik, name, normalize_clean(name)),
-        )
-
-    # 3. Seed candidate under-studied plants with authentic IUPAC InChIKeys and DOIs
-    understudied_plants_data = [
-        (
-            "Smallanthus sonchifolius",
-            [
-                ("MWXXFIPQWLFJRW-QZHYUDFBSA-N", "MWXXFIPQWLFJRW", "Uvedalin", r"C[C@@H]1[C@](O1)(C)C(=O)O[C@H]2[C@@H]3[C@@H](/C=C(/CC/C=C(\[C@@H]2OC(=O)C)/C(=O)OC)\C)OC(=O)C3=C", 448.5, 1.9, 118.0, 0.60, 4, "LOTUS", "10.1016/0031-9422(79)83025-1"),
-                ("PXWNJILKRLNDAH-UHFFFAOYSA-N", "PXWNJILKRLNDAH", "Enhydrin", r"C[C@@H]1[C@](O1)(C)C(=O)O[C@H]2[C@@H]3[C@@H]([C@@H]4[C@](O4)(CC/C=C(\[C@@H]2OC(=O)C)/C(=O)OC)C)OC(=O)C3=C", 464.5, 1.4, 130.0, 0.55, 3, "LOTUS", "10.1016/S0031-9422(00)88123-4"),
-                ("DBSZDVZLFLCIOQ-VPXSVSNXSA-N", "DBSZDVZLFLCIOQ", "Sonchifolin", r"C/C=C(/C)\C(=O)OC1C/C(=C\CC/C(=C/C2C1C(=C)C(=O)O2)/C)/C(=O)OC", 374.4, 3.3, 78.9, 0.65, 2, "LOTUS", "10.1016/0031-9422(80)85021-7"),
-                ("CWVRJTMFETXNAD-JUHZACGLSA-N", "CWVRJTMFETXNAD", "Chlorogenic acid", r"C1[C@H]([C@H]([C@@H](C[C@@]1(C(=O)O)O)OC(=O)/C=C/C2=CC(=C(C=C2)O)O)O)O", 354.31, -0.4, 165.0, 0.35, 5, "LOTUS, COCONUT", "10.1021/ja01150a045"),
-            ],
-        ),
-        (
-            "Petiveria alliacea",
-            [
-                ("UXDMWYANCHMSJX-UHFFFAOYSA-N", "UXDMWYANCHMSJX", "Dibenzyl trisulfide", "C1=CC=C(C=C1)CSSSCC2=CC=CC=C2", 278.5, 4.3, 75.9, 0.50, 6, "LOTUS, COCONUT", "10.1016/0031-9422(91)85283-U"),
-                ("VUJONJHZKSZFSA-UHFFFAOYSA-N", "VUJONJHZKSZFSA", "Petivericin", "C1=CC=C(C=C1)CSS(=O)CC2=CC=CC=C2", 262.4, 3.0, 61.6, 0.52, 3, "LOTUS", "10.1016/S0031-9422(00)80512-7"),
-                ("HGTSZOYDQGUVER-UHFFFAOYSA-N", "HGTSZOYDQGUVER", "Leridal", "CC1=C2C(=C(C(=C1OC)C=O)O)C(=O)CC(O2)C3=CC=CC=C3", 312.3, 2.9, 72.8, 0.70, 2, "LOTUS", "10.1016/0031-9422(93)85324-4"),
-            ],
-        ),
-        (
-            "Dysphania ambrosioides",
-            [
-                ("MGYMHQJELJYRQS-UHFFFAOYSA-N", "MGYMHQJELJYRQS", "Ascaridole", "CC(C)C12CCC(C=C1)(OO2)C", 168.23, 2.3, 18.5, 0.62, 7, "LOTUS, COCONUT", "10.1021/ja01234a021"),
-                ("LEZWCCRTFNBOBU-SGIHWFKDSA-N", "LEZWCCRTFNBOBU", "Isoascaridole", "CC(C)[C@]12CC[C@@]3([C@H]([C@H]1O2)O3)C", 168.23, 1.6, 25.1, 0.60, 3, "LOTUS", "10.1021/ja01234a022"),
-                ("TZDMGBLPGZXHJI-UHFFFAOYSA-N", "TZDMGBLPGZXHJI", "Pinocarvone", "CC1(C2CC1C(=C)C(=O)C2)C", 150.22, 2.2, 17.1, 0.65, 4, "LOTUS", "10.1021/jo01023a011"),
-            ],
-        ),
-    ]
-
-    for sp_name, comp_list in understudied_plants_data:
-        p_org_id = org_ids[sp_name]
-        for ik, fb, name, smiles, mw, alogp, tpsa, qed, refs, sdb, doi in comp_list:
-            flags = 3 if "COCONUT" in sdb and "LOTUS" in sdb else (1 if "LOTUS" in sdb else 2)
-            cur.execute(
-                """
-                INSERT INTO compounds (
-                    inchikey, inchikey_block1, smiles, name, molecular_weight, alogp, tpsa, qed, source_flags
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(inchikey) DO UPDATE SET
-                    source_flags = compounds.source_flags | excluded.source_flags,
-                    name = COALESCE(compounds.name, excluded.name),
-                    smiles = COALESCE(compounds.smiles, excluded.smiles)
-                """,
-                (ik, fb, smiles, name, mw, alogp, tpsa, qed, flags),
-            )
-            cur.execute(
-                """
-                INSERT OR REPLACE INTO occurrences (
-                    organism_id, inchikey, inchikey_block1, source_db, reference_count, lotus_ref_count, coconut_ref_count, reference_dois
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (p_org_id, ik, fb, sdb, refs, refs, 1 if "COCONUT" in sdb else 0, doi),
-            )
-            cur.execute(
-                """
-                INSERT OR IGNORE INTO synonyms (entity_type, entity_key, synonym, clean_synonym, language)
-                VALUES ('COMPOUND', ?, ?, ?, 'en')
-                """,
-                (ik, name, normalize_clean(name)),
-            )
+    else:
+        print(f"[!] Pilot compounds file not found at {pilot_compounds_file}; "
+              "no Curcuma compounds seeded.")
 
     conn.commit()
-    print("[SUCCESS] Seeding complete.")
+    print("[SUCCESS] Seeding complete. Only Curcuma longa carries compounds (real pilot CSV);")
+    print("          the other seeded species exist as organisms with synonyms and zero compounds.")
 
 
 def ingest_lotus_raw(conn: sqlite3.Connection, raw_path: Path) -> int:
@@ -937,8 +726,125 @@ def ingest_coconut_raw(conn: sqlite3.Connection, raw_path: Path) -> int:
     return occ_count
 
 
-def verify_database_integrity(conn: sqlite3.Connection) -> dict[str, Any]:
-    """Verifies that Curcuma longa and overall database satisfy all acceptance requirements."""
+def write_build_info(conn: sqlite3.Connection, mode: str, sources: dict) -> None:
+    """Records how this index was built: mode ('demo'|'full'), build date, and sources.
+
+    `sources` maps a source name to a version/identifier string; each becomes a
+    row keyed 'source_<name>'. Existing build_info rows are replaced.
+    """
+    cur = conn.cursor()
+    rows = [
+        ("mode", mode),
+        ("build_date", datetime.date.today().isoformat()),
+    ]
+    for name, version in sources.items():
+        rows.append((f"source_{name}", str(version)))
+    cur.executemany(
+        "INSERT OR REPLACE INTO build_info (key, value) VALUES (?, ?)",
+        rows,
+    )
+    conn.commit()
+    print(f"[*] build_info written: mode={mode}, sources={sources}")
+
+
+def verify_inchikeys(conn: sqlite3.Connection) -> dict[str, Any]:
+    """RDKit build gate: recompute the InChIKey connectivity block (first 14 chars)
+    from each compound's SMILES and compare to the stored inchikey_block1.
+
+    Rows whose SMILES RDKit cannot parse are counted as warnings (not failures).
+    Returns a stats dict; the caller decides whether to raise on mismatches.
+    """
+    from rdkit import Chem
+    from rdkit.Chem import inchi
+    from rdkit import RDLogger
+
+    RDLogger.DisableLog("rdApp.*")
+
+    cur = conn.cursor()
+    cur.execute("SELECT inchikey, inchikey_block1, smiles FROM compounds WHERE smiles IS NOT NULL AND smiles != ''")
+    rows = cur.fetchall()
+
+    mismatches = []
+    unparseable = []
+    checked = 0
+
+    for ik, stored_block, smiles in rows:
+        mol = Chem.MolFromSmiles(smiles)
+        if mol is None:
+            unparseable.append((ik, smiles))
+            continue
+        try:
+            computed_block = inchi.MolToInchiKey(mol).split("-")[0]
+        except Exception:
+            unparseable.append((ik, smiles))
+            continue
+        checked += 1
+        if (stored_block or "")[:14] != computed_block[:14]:
+            mismatches.append((ik, stored_block, computed_block))
+
+    print("\n" + "-" * 60)
+    print("           RDKit InChIKey BUILD GATE")
+    print("-" * 60)
+    print(f"Compounds with SMILES:   {len(rows):,}")
+    print(f"Checked (parseable):     {checked:,}")
+    print(f"Connectivity mismatches: {len(mismatches)}")
+    print(f"Unparseable (warnings):  {len(unparseable)}")
+    if unparseable:
+        print("  [WARN] RDKit could not parse these SMILES (not a failure):")
+        for ik, smiles in unparseable[:10]:
+            print(f"    {ik}: {smiles}")
+        if len(unparseable) > 10:
+            print(f"    ... and {len(unparseable) - 10} more")
+    if mismatches:
+        print("  [FAIL] InChIKey connectivity mismatches:")
+        for ik, stored, computed in mismatches[:20]:
+            print(f"    {ik}: stored block1={stored!r} vs RDKit={computed!r}")
+        if len(mismatches) > 20:
+            print(f"    ... and {len(mismatches) - 20} more")
+    print("-" * 60 + "\n")
+
+    if mismatches:
+        raise AssertionError(
+            f"InChIKey build gate failed: {len(mismatches)} connectivity mismatch(es). "
+            f"First: {mismatches[0]}"
+        )
+
+    return {
+        "inchikey_checked": checked,
+        "inchikey_mismatches": len(mismatches),
+        "inchikey_unparseable": len(unparseable),
+    }
+
+
+def _pilot_csv_lotus_expected() -> tuple[int | None, int | None]:
+    """Reads piloto_curcuma/compuestos.csv and returns (row_count, sum_n_refs).
+
+    Used to derive the expected Curcuma longa pilot counts dynamically instead of
+    hard-coding 239/508. Returns (None, None) if the CSV is unavailable.
+    """
+    pilot = PILOTO_DIR / "compuestos.csv"
+    if not pilot.exists():
+        return None, None
+    try:
+        with open(pilot, "r", encoding="utf-8") as f:
+            rows = list(csv.DictReader(f))
+        count = len(rows)
+        refs = sum(int(r.get("n_refs", 1) or 1) for r in rows)
+        return count, refs
+    except Exception:
+        return None, None
+
+
+def verify_database_integrity(conn: sqlite3.Connection, strict_full: bool = False) -> dict[str, Any]:
+    """Verifies the Curcuma longa pilot and overall database integrity.
+
+    `strict_full` is reserved for full (raw-ingestion) builds. In all modes the
+    assertions only cover facts that are genuinely true for the current build:
+    valid InChIKeys, populated DOIs, Curcumin present, and (when the pilot CSV is
+    available) the Curcuma LOTUS record count / reference sum matching the CSV.
+    The fabricated dual-provenance rows were removed, so dual provenance is no
+    longer asserted.
+    """
     cur = conn.cursor()
 
     # 1. Check Curcuma longa occurrences
@@ -1023,24 +929,51 @@ def verify_database_integrity(conn: sqlite3.Connection) -> dict[str, Any]:
     print(f"Occurrences with DOIs: {refs_populated_count:,}")
     print(f"Invalid InChIKeys:     {len(bad_keys)}")
     print("-" * 60)
-    print(f"Curcuma longa LOTUS records:   {curcuma_lotus_count} (Expected: 239)")
-    print(f"Curcuma longa Distinct Blocks: {curcuma_blocks} (Expected: >= 169)")
-    print(f"Curcuma longa LOTUS Refs Sum:  {sum_lotus_refs} (Expected: 508)")
-    print(f"Curcuma longa COCONUT records: {curcuma_coconut_count} (Expected: > 0)")
-    print(f"Curcuma longa Dual Provenance: {curcuma_dual_count} (Expected: > 0)")
+    exp_count, exp_refs = _pilot_csv_lotus_expected()
+    exp_count_str = exp_count if exp_count is not None else "n/a"
+    exp_refs_str = exp_refs if exp_refs is not None else "n/a"
+    print(f"Curcuma longa LOTUS records:   {curcuma_lotus_count} (pilot CSV: {exp_count_str})")
+    print(f"Curcuma longa Distinct Blocks: {curcuma_blocks}")
+    print(f"Curcuma longa LOTUS Refs Sum:  {sum_lotus_refs} (pilot CSV: {exp_refs_str})")
+    print(f"Curcuma longa COCONUT records: {curcuma_coconut_count}")
+    print(f"Curcuma longa Dual Provenance: {curcuma_dual_count}")
     print(f"Curcumin (VFLDPWHFBUODDF):     {'FOUND' if curcumin_rows else 'MISSING'}")
     print("=" * 60 + "\n")
 
-    # Rigorous assertions
+    # Assertions: only facts genuinely true for the current build.
     assert len(bad_keys) == 0, f"Found {len(bad_keys)} invalid InChIKeys: {bad_keys[:5]}"
     assert refs_populated_count > 0, "Occurrences must have reference_dois populated"
-    assert curcuma_lotus_count == 239, f"Expected 239 LOTUS records for Curcuma longa, got {curcuma_lotus_count}"
-    assert curcuma_blocks >= 169, f"Expected >= 169 distinct blocks for Curcuma longa, got {curcuma_blocks}"
-    assert sum_lotus_refs == 508, f"Expected 508 sum of references for Curcuma longa LOTUS, got {sum_lotus_refs}"
     assert len(curcumin_rows) > 0, "Curcumin (VFLDPWHFBUODDF) must be present in Curcuma longa"
-    assert curcuma_dual_count > 0, "Dual provenance (LOTUS, COCONUT) must be present in Curcuma longa"
+    assert curcuma_lotus_count > 0, f"Curcuma longa must have LOTUS records, got {curcuma_lotus_count}"
+    assert sum_lotus_refs and sum_lotus_refs > 0, f"Curcuma longa LOTUS refs sum must be > 0, got {sum_lotus_refs}"
+
+    # When the pilot CSV is present, the loaded pilot counts must match it exactly.
+    # (Not hard-coded: derived from compuestos.csv. In a full raw build these
+    #  counts can legitimately grow, so only enforce equality when they match the
+    #  CSV-only demo state, otherwise require at least the pilot amount.)
+    if exp_count is not None:
+        if strict_full:
+            assert curcuma_lotus_count >= exp_count, (
+                f"Full build: expected >= {exp_count} Curcuma LOTUS records, got {curcuma_lotus_count}"
+            )
+            assert sum_lotus_refs >= exp_refs, (
+                f"Full build: expected >= {exp_refs} Curcuma LOTUS refs, got {sum_lotus_refs}"
+            )
+        else:
+            assert curcuma_lotus_count == exp_count, (
+                f"Demo build: expected {exp_count} Curcuma LOTUS records from pilot CSV, "
+                f"got {curcuma_lotus_count}"
+            )
+            assert sum_lotus_refs == exp_refs, (
+                f"Demo build: expected {exp_refs} Curcuma LOTUS refs from pilot CSV, "
+                f"got {sum_lotus_refs}"
+            )
 
     return stats
+
+
+LOTUS_DUMP_FILENAME = "260413_frozen_metadata.csv.gz"
+COCONUT_DUMP_FILENAME = "coconut_csv-10-2026.zip"
 
 
 def main():
@@ -1048,11 +981,34 @@ def main():
     parser.add_argument("--db-path", type=Path, default=DEFAULT_DB_PATH, help="Path to natural_products.db")
     parser.add_argument("--raw-dir", type=Path, default=DEFAULT_RAW_DIR, help="Path to raw dumps directory")
     parser.add_argument("--download", action="store_true", help="Download raw dumps if not already cached")
-    parser.add_argument("--seed-only", action="store_true", help="Seed verified pilot and curated data only")
+    parser.add_argument(
+        "--demo",
+        action="store_true",
+        help="Build a demonstration index from the Curcuma pilot only (no raw ingestion).",
+    )
+    # Backward-compatible hidden alias for --demo.
+    parser.add_argument("--seed-only", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--force", "-f", action="store_true", help="Recreate database from scratch")
     args = parser.parse_args()
 
+    demo = args.demo or args.seed_only
+
     print(f"Target Database: {args.db_path.resolve()}")
+
+    lotus_dump = args.raw_dir / LOTUS_DUMP_FILENAME
+    coconut_dump = args.raw_dir / COCONUT_DUMP_FILENAME
+
+    # Default behavior (review D1): a non-demo, non-download run with missing dumps
+    # must fail loudly instead of silently falling back to seeding.
+    if not demo and not args.download:
+        if not lotus_dump.exists() or not coconut_dump.exists():
+            print(
+                f"ERROR: No se encontraron los dumps de LOTUS/COCONUT en {args.raw_dir}. "
+                "Ejecute con --download para descargarlos, o con --demo para construir "
+                "un índice de demostración (solo Curcuma).",
+                file=sys.stderr,
+            )
+            return 1
 
     if args.download:
         from download_dumps import download_lotus, download_coconut
@@ -1061,24 +1017,54 @@ def main():
         download_lotus(args.raw_dir)
         download_coconut(args.raw_dir)
 
-    conn = init_db(args.db_path, force=args.force)
+    if demo:
+        print("\n" + "#" * 60)
+        print("#  MODO DEMOSTRACIÓN  —  índice solo del piloto Curcuma longa")
+        print("#  (sin ingesta de dumps crudos LOTUS/COCONUT)")
+        print("#" * 60 + "\n")
 
-    # Always seed verified pilot & curated ground truth to guarantee 100% pilot reproduction
+        conn = init_db(args.db_path, force=args.force)
+        seed_verified_pilot_and_curated(conn)
+        write_build_info(conn, mode="demo", sources={"pilot": "piloto_curcuma"})
+
+        # RDKit InChIKey build gate, then light verification.
+        verify_inchikeys(conn)
+        verify_database_integrity(conn, strict_full=False)
+        conn.close()
+
+        print("[SUCCESS] MODO DEMOSTRACIÓN: índice de demostración construido y verificado.")
+        return 0
+
+    # Full build path: download (if requested) / dumps present -> real ingestion.
+    conn = init_db(args.db_path, force=args.force)
     seed_verified_pilot_and_curated(conn)
 
-    lotus_dump = args.raw_dir / "260413_frozen_metadata.csv.gz"
-    if not args.seed_only and lotus_dump.exists():
-        ingest_lotus_raw(conn, lotus_dump)
+    lotus_count = 0
+    coconut_count = 0
+    if lotus_dump.exists():
+        lotus_count = ingest_lotus_raw(conn, lotus_dump)
+    if coconut_dump.exists():
+        coconut_count = ingest_coconut_raw(conn, coconut_dump)
 
-    coconut_dump = args.raw_dir / "coconut_csv-10-2026.zip"
-    if not args.seed_only and coconut_dump.exists():
-        ingest_coconut_raw(conn, coconut_dump)
+    write_build_info(
+        conn,
+        mode="full",
+        sources={
+            "pilot": "piloto_curcuma",
+            "LOTUS": LOTUS_DUMP_FILENAME,
+            "COCONUT": COCONUT_DUMP_FILENAME,
+        },
+    )
 
-    # Verification gate
-    stats = verify_database_integrity(conn)
+    # RDKit InChIKey build gate, then full verification.
+    verify_inchikeys(conn)
+    verify_database_integrity(conn, strict_full=True)
     conn.close()
 
-    print("[SUCCESS] Data preparation completed successfully. Database verified.")
+    print(
+        f"[SUCCESS] Data preparation completed successfully "
+        f"(LOTUS occ={lotus_count:,}, COCONUT occ={coconut_count:,}). Database verified."
+    )
     return 0
 
 

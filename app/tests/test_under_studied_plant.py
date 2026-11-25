@@ -5,30 +5,21 @@ Authoritative Reference:
 - ORIGINAL_REQUEST.md (Requirement R6 & Acceptance Criteria)
 - diapositiva_curcuma.md
 
-Evaluates and compares 4 candidate species using real data from data/natural_products.db
-and the core pipeline:
-1. Smallanthus sonchifolius (Yacón) - Asteraceae
-2. Petiveria alliacea (Anamú) - Petiveriaceae
-3. Dysphania ambrosioides (Epazote) - Amaranthaceae
-4. Montanoa tomentosa (Zoapatle) - Asteraceae
+Honest under-studied-plant evaluation (rewritten per review X3/D2).
 
-Results of Real Systematic Evaluation:
----------------------------------------------------------------------------------------------------------
-Especie                    Común    N    Skel  ChEMBL  Actividades  Blancos  Vías  Score  Selección
----------------------------------------------------------------------------------------------------------
-Smallanthus sonchifolius   Yacón    4    4     1       12           7        15    29.2   ÓPTIMA SELECCIONADA
-Petiveria alliacea         Anamú    3    3     3       2            2        15    18.0   Validación secundaria
-Dysphania ambrosioides     Epazote  3    3     2       0            0        0      3.0   Escasa actividad
-Montanoa tomentosa         Zoapatle 0    0     0       0            0        0      0.0   Sin datos LOTUS/COCONUT
----------------------------------------------------------------------------------------------------------
+The previous version pinned a Data Coverage Score of 29.2 for Smallanthus sonchifolius
+(Yacón) computed from 4 HAND-TYPED, fabricated seed compounds. Those rows have been
+removed (review X1/D2), so the candidate species now carry no compound data in the demo
+index and correctly yield the honest empty-state score of 0.
 
-Primary Selection Rationale:
-- Smallanthus sonchifolius (Yacón) is the optimal under-studied model plant.
-- Possesses 4 reported natural compounds and 4 distinct chemical skeletons.
-- Links genuinely to ChEMBL (1 compound) with 12 measured IC50/Ki activities on 7 human single-protein targets.
-- Resolves to 15 Reactome biological pathways (D=1.00, E=0.43).
-- Yields a Data Coverage Score of 29.2/100 (demonstrating sparse, under-studied status: Score <= 30.0).
-- Contrasts sharply with the well-studied Curcuma longa (Score 60.0/100, N=239, 140 targets).
+These tests therefore assert the honest contract:
+- The candidate species resolve as recognised organisms (not "name not found").
+- With zero compounds they produce Score 0 through the SAME real pipeline (no branch).
+- Curcuma longa, the well-studied model, carries the real pilot data and scores > 0.
+
+The definitive under-studied selection required by R6 must be redone against a FULL
+LOTUS/COCONUT index (run `python scripts/prepare_data.py --download`), as noted in the
+review's section 6. A demo/seed-only run cannot stand in for that validation.
 """
 
 from __future__ import annotations
@@ -113,78 +104,43 @@ class TestUnderStudiedPlantEvaluation:
             "Smallanthus sonchifolius",
             "Petiveria alliacea",
             "Dysphania ambrosioides",
-            "Montanoa tomentosa",
         ]
         results = {cand: evaluate_species_metrics(cand) for cand in candidates}
 
-        # Verify candidate 1: Smallanthus sonchifolius
-        s_yacon = results["Smallanthus sonchifolius"]
-        assert s_yacon["n_reported"] == 4
-        assert s_yacon["distinct_skeletons"] == 4
-        assert s_yacon["chembl_matches"] == 1
-        assert s_yacon["filtered_activities"] == 12
-        assert s_yacon["unique_targets"] == 7
-        assert s_yacon["reactome_pathways"] >= 10
-        assert 25.0 <= s_yacon["score"] <= 30.0
+        # After removing the fabricated hand-typed seed rows (review X1/D2), each
+        # candidate species is RECOGNISED as an organism but carries no compound data
+        # in the demo index. This is the honest "recognised, no data" state (D7): the
+        # pipeline runs identically and yields a Data Coverage Score of 0, not a
+        # fabricated score. The real under-studied selection (R6) must be redone after
+        # a full LOTUS/COCONUT ingestion, per the review's section 6.
+        for name, m in results.items():
+            assert m["n_reported"] == 0, (
+                f"{name} should have zero compounds in the demo index until real ingestion; "
+                f"a non-zero count would indicate fabricated seed rows reappeared."
+            )
+            assert m["score"] == 0.0, f"{name} empty-state score must be 0, got {m['score']}"
 
-        # Verify candidate 2: Petiveria alliacea
-        s_anamu = results["Petiveria alliacea"]
-        assert s_anamu["n_reported"] == 3
-        assert s_anamu["distinct_skeletons"] == 3
-        assert s_anamu["chembl_matches"] == 3
-        assert s_anamu["filtered_activities"] == 2
-        assert s_anamu["unique_targets"] == 2
-        assert s_anamu["score"] <= 20.0
+    def test_under_studied_candidates_are_recognised_organisms(self):
+        """Each candidate resolves as a known organism even without compound data (D7)."""
+        from app.core import name_resolver
 
-        # Verify candidate 3: Dysphania ambrosioides
-        s_epazote = results["Dysphania ambrosioides"]
-        assert s_epazote["n_reported"] == 3
-        assert s_epazote["distinct_skeletons"] == 3
-        assert s_epazote["chembl_matches"] == 2
-        assert s_epazote["filtered_activities"] == 0
-        assert s_epazote["unique_targets"] == 0
-        assert s_epazote["score"] == 3.0
+        for name in ["Smallanthus sonchifolius", "Petiveria alliacea", "Dysphania ambrosioides"]:
+            resolved = name_resolver.resolve_plant_name(name)
+            # It must NOT be an unrecognised name: the organism is in the index.
+            assert resolved.get("canonical_name"), f"{name} should resolve to a canonical name"
+            assert resolved.get("status") != "NO_DATA", (
+                f"{name} is a seeded organism and must be recognised, even with no compounds."
+            )
 
-        # Verify candidate 4: Montanoa tomentosa
-        s_zoapatle = results["Montanoa tomentosa"]
-        assert s_zoapatle["n_reported"] == 0
-        assert s_zoapatle["score"] == 0.0
-
-    def test_optimal_under_studied_plant_yacon_detailed_metrics(self):
-        """Asserts exact metrics and 5-component score breakdown for Smallanthus sonchifolius."""
+    def test_empty_state_score_is_zero_not_fabricated(self):
+        """A recognised plant with zero compounds yields Score 0 via the real scorer (D7)."""
         metrics = evaluate_species_metrics("Smallanthus sonchifolius")
+        assert metrics["n_reported"] == 0
+        assert metrics["score"] == 0.0
 
-        # Basic counts
-        assert metrics["n_reported"] == 4
-        assert metrics["distinct_skeletons"] == 4
-        assert metrics["chembl_matches"] == 1
-        assert metrics["filtered_activities"] == 12
-        assert metrics["unique_targets"] == 7
-        assert metrics["reactome_pathways"] == 15
-
-        # 5-Component Score breakdown
-        # A = min(1.0, 0.20 + 0.10 * log2(4)) = 0.20 + 0.10 * 2.0 = 0.40 -> approx 0.35
-        assert 0.30 <= metrics["score_A"] <= 0.45
-        assert metrics["score_D"] == 1.00  # All targets recognized by Reactome
-        assert metrics["score_E"] > 0.0    # Has depth of evidence
-
-        # Final score strictly under 30.0 (indicative of sparse evidence / under-studied status)
-        assert metrics["score"] <= 30.0
-        assert round(metrics["score"], 1) == 29.2
-
-        # Dominance warning check: with only 7 targets, no massive single compound over 100 targets
-        assert metrics["dominance"]["is_dominant"] is False or metrics["unique_targets"] < 10
-
-    def test_contrast_model_plant_curcuma_vs_under_studied_yacon(self):
-        """Validates quantitative contrast between well-studied Curcuma longa and Smallanthus sonchifolius."""
-        yacon = evaluate_species_metrics("Smallanthus sonchifolius")
-
-        # Curcuma longa ground truth
-        curcuma_reported = 239
-        curcuma_targets = 140
-        curcuma_score = 60.0
-
-        # Proportions and contrast
-        assert yacon["n_reported"] < curcuma_reported / 50  # 4 vs 239 (sparse fitoquímica)
-        assert yacon["unique_targets"] < curcuma_targets / 10  # 7 vs 140 (sparse bioactividad)
-        assert yacon["score"] < curcuma_score / 2  # 29.2 vs 60.0 (cobertura baja pero informativa)
+    def test_contrast_model_plant_curcuma_has_data(self):
+        """Curcuma longa is the well-studied model: it has real pilot data and a positive score."""
+        curcuma = evaluate_species_metrics("Curcuma longa")
+        assert curcuma["n_reported"] >= 200, "Curcuma longa must carry the real pilot compounds."
+        # Its score is computed by the real scorer from real data, and is clearly positive.
+        assert curcuma["score"] > 0.0
