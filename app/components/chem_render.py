@@ -14,6 +14,15 @@ import streamlit as st
 
 logger = logging.getLogger(__name__)
 
+# Silence RDKit's C++ parse-error chatter on stderr; invalid SMILES are handled
+# by returning None/False, so the warnings are noise for our use.
+try:  # pragma: no cover - best effort, depends on RDKit build
+    from rdkit import RDLogger
+
+    RDLogger.DisableLog("rdApp.*")
+except Exception:  # pragma: no cover
+    pass
+
 
 @functools.lru_cache(maxsize=128)
 def smiles_to_svg(
@@ -83,3 +92,43 @@ def render_molecule_svg(
     st.markdown(svg_html, unsafe_allow_html=True)
     if caption:
         st.caption(caption)
+
+
+@functools.lru_cache(maxsize=256)
+def smiles_to_inchikey(smiles: str) -> Optional[str]:
+    """Converts a SMILES string to a full InChIKey using RDKit (review V7).
+
+    Returns None when the SMILES is empty or cannot be parsed. This closes the R1
+    gap where SMILES input was detected but never converted, so SMILES searches
+    went nowhere.
+    """
+    if not smiles or not smiles.strip():
+        return None
+    try:
+        from rdkit import Chem
+        from rdkit.Chem import inchi
+
+        mol = Chem.MolFromSmiles(smiles.strip())
+        if mol is None:
+            return None
+        key = inchi.MolToInchiKey(mol)
+        return key or None
+    except Exception as e:  # pragma: no cover - defensive
+        logger.debug("SMILES->InChIKey conversion failed for %s: %s", smiles, e)
+        return None
+
+
+def is_valid_smiles(text: str) -> bool:
+    """Returns True only when RDKit can parse ``text`` as a molecule.
+
+    Used to disambiguate plain names from SMILES (e.g. 'CCO' is valid SMILES for
+    ethanol, which the old character-based detector misclassified as a name).
+    """
+    if not text or not text.strip():
+        return False
+    try:
+        from rdkit import Chem
+
+        return Chem.MolFromSmiles(text.strip()) is not None
+    except Exception:  # pragma: no cover - defensive
+        return False

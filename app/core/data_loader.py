@@ -171,7 +171,7 @@ def get_plant_compounds(
 
     with _cache_lock:
         if cache_key in _plant_compounds_cache:
-            return list(_plant_compounds_cache[cache_key])
+            return [dict(r) for r in _plant_compounds_cache[cache_key]]
 
         cur = conn.cursor()
 
@@ -209,7 +209,9 @@ def get_plant_compounds(
         )
         results = [dict(row) for row in cur.fetchall()]
         _plant_compounds_cache[cache_key] = results
-        return list(results)
+        # Return deep copies so callers that mutate compound dicts in place
+        # (e.g. writing chembl_id) never pollute the shared cache (review X5).
+        return [dict(r) for r in results]
 
 
 def get_compound_plants(
@@ -417,3 +419,84 @@ def get_organism_metadata(
     org_dict["common_names_es"] = [r["synonym"] for r in syns if r["language"] == "es"]
     org_dict["common_names_en"] = [r["synonym"] for r in syns if r["language"] == "en"]
     return org_dict
+
+
+def suggest_plants(
+    query: str,
+    limit: int = 10,
+    conn: Optional[sqlite3.Connection] = None,
+    db_path: str | Path = DEFAULT_DB_PATH,
+) -> list[tuple[str, str]]:
+    """Returns (label, canonical_name) suggestions for plants that exist in the index.
+
+    Each label reads like "Allium sativum — ajo · Amaryllidaceae · 312 compuestos"
+    (review V4). Only species with at least one indexed occurrence are returned, so a
+    suggestion never leads to an empty-data dead end.
+    """
+    if conn is None:
+        conn = get_connection(db_path)
+
+    raw = search_plants_autocomplete(query, limit=limit * 2, conn=conn)
+    seen: set[str] = set()
+    out: list[tuple[str, str]] = []
+    cur = conn.cursor()
+
+    for row in raw:
+        canonical = row.get("canonical_name")
+        if not canonical or canonical in seen:
+            continue
+        seen.add(canonical)
+
+        org = cur.execute(
+            "SELECT organism_id, family FROM organisms WHERE canonical_name = ? COLLATE NOCASE LIMIT 1",
+            (canonical,),
+        ).fetchone()
+        if not org:
+            continue
+        n_compounds = cur.execute(
+            "SELECT COUNT(DISTINCT inchikey) FROM occurrences WHERE organism_id = ?",
+            (org["organism_id"],),
+        ).fetchone()[0]
+        if not n_compounds:
+            continue  # recognised but no data: not offered as a suggestion
+
+        # A common name only when the matched synonym differs from the canonical name.
+        matched = row.get("synonym")
+        common = f" — {matched}" if matched and matched.lower() != canonical.lower() else ""
+        family = org["family"] or "Familia no determinada"
+        label = f"{canonical}{common} · {family} · {n_compounds} compuestos"
+        out.append((label, canonical))
+        if len(out) >= limit:
+            break
+
+    return out
+
+
+def suggest_compounds(
+    query: str,
+    limit: int = 10,
+    conn: Optional[sqlite3.Connection] = None,
+    db_path: str | Path = DEFAULT_DB_PATH,
+) -> list[tuple[str, str]]:
+    """Returns (label, value) suggestions for molecules present in the index.
+
+    The returned value is the compound name (or InChIKey when unnamed) so the tab
+    can re-resolve it deterministically.
+    """
+    if conn is None:
+        conn = get_connection(db_path)
+
+    rows = search_compounds_autocomplete(query, limit=limit, conn=conn)
+    out: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for r in rows:
+        ik = r.get("inchikey") or ""
+        name = r.get("name") or ik
+        value = name if r.get("name") else ik
+        if value in seen:
+            continue
+        seen.add(value)
+        block1 = r.get("inchikey_block1") or (ik.split("-")[0] if ik else "")
+        label = f"{name}" + (f" · {block1}" if block1 else "")
+        out.append((label, value))
+    return out

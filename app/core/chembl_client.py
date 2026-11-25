@@ -207,7 +207,10 @@ def _preload_pilot_data() -> None:
                         except ValueError:
                             pchembl_val = None
 
-                        target_cid = "CHEMBL230" if "prostaglandin" in target_name.lower() or "cox-2" in target_name.lower() or uniprot == "P35354" else f"T_{uniprot}"
+                        # Key the pilot target uniformly by its real UniProt accession.
+                        # No per-entity special-casing: the real ChEMBL target ID is
+                        # resolved live by the app when needed (review honesty gate).
+                        target_cid = f"UNIPROT:{uniprot}" if uniprot else ""
 
                         act_entry = {
                             "chembl_mol": cid,
@@ -239,15 +242,6 @@ def _preload_pilot_data() -> None:
                             }
             except Exception as e:
                 logger.warning("Failed preloading actividades.csv: %s", e)
-
-        # Preload well-known targets
-        _PILOT_TARGET_INFO["CHEMBL230"] = {
-            "target_chembl_id": "CHEMBL230",
-            "pref_name": "Prostaglandin G/H synthase 2",
-            "uniprot": "P35354",
-            "target_type": "SINGLE PROTEIN",
-            "organism": "Homo sapiens",
-        }
 
         _pilot_preloaded = True
 
@@ -701,3 +695,113 @@ def search_target_by_gene_or_name(
         _save_to_cache(cache_key, "/chembl/api/data/target/search.json", results, db_path=db_path)
 
     return results
+
+
+def get_inchikeys_for_molecules(
+    molecule_chembl_ids: list[str],
+    use_cache: bool = True,
+    timeout: float = 12.0,
+    db_path: Path = DEFAULT_DB_PATH,
+) -> dict[str, str]:
+    """Maps ChEMBL molecule IDs to their standard InChIKeys (review V8).
+
+    Enables the target -> molecule -> InChIKey -> plant pipeline. Queries ChEMBL in
+    batches of 25 via ``molecule_chembl_id__in`` and caches per-molecule results.
+    """
+    _preload_pilot_data()
+    clean = [m.strip().upper() for m in molecule_chembl_ids if m and m.strip()]
+    if not clean:
+        return {}
+
+    results: dict[str, str] = {}
+    missing: list[str] = []
+    for mid in clean:
+        if use_cache:
+            cached = _get_from_cache(f"chembl:mol_ik:{mid}", db_path=db_path)
+            if cached is not None:
+                if cached:
+                    results[mid] = cached
+                continue
+        missing.append(mid)
+
+    for i in range(0, len(missing), 25):
+        batch = missing[i : i + 25]
+        q = ",".join(batch)
+        url = (
+            f"{CHEMBL_BASE_URL}/molecule.json?molecule_chembl_id__in={urllib.parse.quote(q)}"
+            f"&limit=100&only=molecule_chembl_id,molecule_structures"
+        )
+        resp = _http_get_json(url, timeout=timeout)
+        found: set[str] = set()
+        if resp and "molecules" in resp:
+            for m in resp["molecules"]:
+                mid = (m.get("molecule_chembl_id") or "").upper()
+                structs = m.get("molecule_structures") or {}
+                ik = structs.get("standard_inchi_key")
+                if mid and ik:
+                    results[mid] = ik
+                    found.add(mid)
+                    if use_cache:
+                        _save_to_cache(f"chembl:mol_ik:{mid}", "/chembl/api/data/molecule.json", ik, db_path=db_path)
+        if use_cache:
+            for mid in batch:
+                if mid not in found:
+                    _save_to_cache(f"chembl:mol_ik:{mid}", "/chembl/api/data/molecule.json", "", db_path=db_path)
+        if resp is not None and i + 25 < len(missing):
+            time.sleep(0.1)
+
+    return results
+
+
+def search_targets_by_uniprots(
+    uniprot_ids: list[str],
+    use_cache: bool = True,
+    timeout: float = 12.0,
+    db_path: Path = DEFAULT_DB_PATH,
+) -> list[dict[str, Any]]:
+    """Finds ChEMBL single-protein targets for a set of UniProt accessions (review V8).
+
+    Used by Process mode to go pathway participants -> ChEMBL targets. Returns a list
+    of {target_chembl_id, pref_name, uniprot} for human single-protein targets.
+    """
+    clean = sorted({u.strip().upper() for u in uniprot_ids if u and u.strip()})
+    if not clean:
+        return []
+
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for i in range(0, len(clean), 20):
+        batch = clean[i : i + 20]
+        q = ",".join(batch)
+        url = (
+            f"{CHEMBL_BASE_URL}/target.json?target_components__accession__in={urllib.parse.quote(q)}"
+            f"&target_type=SINGLE%20PROTEIN&organism=Homo%20sapiens&limit=200"
+            f"&only=target_chembl_id,pref_name,target_components"
+        )
+        if use_cache:
+            cached = _get_from_cache(f"chembl:targets_by_uniprot:{q}", db_path=db_path)
+            if cached is not None:
+                for t in cached:
+                    if t["target_chembl_id"] not in seen:
+                        seen.add(t["target_chembl_id"])
+                        out.append(t)
+                continue
+        resp = _http_get_json(url, timeout=timeout)
+        batch_rows: list[dict[str, Any]] = []
+        if resp and "targets" in resp:
+            for t in resp["targets"]:
+                comps = t.get("target_components") or []
+                uniprot = comps[0].get("accession") if len(comps) == 1 else None
+                tid = t.get("target_chembl_id")
+                if tid and uniprot:
+                    row = {"target_chembl_id": tid, "pref_name": t.get("pref_name", ""), "uniprot": uniprot}
+                    batch_rows.append(row)
+                    if tid not in seen:
+                        seen.add(tid)
+                        out.append(row)
+        if use_cache:
+            _save_to_cache(f"chembl:targets_by_uniprot:{q}", "/chembl/api/data/target.json", batch_rows, db_path=db_path)
+        if resp is not None and i + 20 < len(clean):
+            time.sleep(0.1)
+
+    return out

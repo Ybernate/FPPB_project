@@ -30,26 +30,27 @@ DB_PATH = PROJECT_ROOT / "data" / "natural_products.db"
 
 @pytest.fixture(scope="session", autouse=True)
 def ensure_indexed_db():
-    """Ensures data/natural_products.db exists and is seeded with verified pilot data."""
-    if not DB_PATH.exists():
+    """Ensures data/natural_products.db exists with the demo (Curcuma pilot) index."""
+    needs_seed = not DB_PATH.exists()
+    if not needs_seed:
+        conn = sqlite3.connect(str(DB_PATH))
+        try:
+            count = conn.execute(
+                """
+                SELECT COUNT(*) FROM occurrences o
+                JOIN organisms org ON o.organism_id = org.organism_id
+                WHERE org.canonical_name = 'Curcuma longa'
+                """
+            ).fetchone()[0]
+        except sqlite3.Error:
+            count = 0
+        conn.close()
+        needs_seed = count == 0
+
+    if needs_seed:
         DB_PATH.parent.mkdir(parents=True, exist_ok=True)
         conn = prepare_data.init_db(DB_PATH, force=False)
         prepare_data.seed_verified_pilot_and_curated(conn)
-        conn.close()
-    else:
-        # Check if Curcuma longa exists
-        conn = sqlite3.connect(str(DB_PATH))
-        cur = conn.cursor()
-        cur.execute(
-            """
-            SELECT COUNT(*) FROM occurrences o
-            JOIN organisms org ON o.organism_id = org.organism_id
-            WHERE org.canonical_name = 'Curcuma longa'
-            """
-        )
-        count = cur.fetchone()[0]
-        if count < 239:
-            prepare_data.seed_verified_pilot_and_curated(conn)
         conn.close()
     return DB_PATH
 
@@ -88,38 +89,49 @@ class TestPilotReplicationInDatabase:
         assert top_comp["lotus_ref_count"] == 55
         assert "curcumin" in top_comp["name"].lower()
 
-    def test_prepare_data_main_execution(self, monkeypatch):
-        """Verifies scripts/prepare_data.py main() executes cleanly and outputs verification stats."""
-        # Test CLI execution with --seed-only
-        monkeypatch.setattr("sys.argv", ["prepare_data.py", "--seed-only"])
+    def test_prepare_data_demo_execution(self, monkeypatch):
+        """scripts/prepare_data.py --demo builds the demo index cleanly and verifies it."""
+        monkeypatch.setattr("sys.argv", ["prepare_data.py", "--demo", "--force"])
         exit_code = prepare_data.main()
         assert exit_code == 0, f"prepare_data.main() returned {exit_code}, expected 0"
+
+    def test_prepare_data_fails_loudly_without_dumps(self, monkeypatch, tmp_path):
+        """Default run must fail loudly (not silently seed) when raw dumps are absent (review D1)."""
+        empty_raw = tmp_path / "raw"
+        empty_raw.mkdir()
+        monkeypatch.setattr(
+            "sys.argv",
+            ["prepare_data.py", "--raw-dir", str(empty_raw), "--db-path", str(tmp_path / "x.db")],
+        )
+        exit_code = prepare_data.main()
+        assert exit_code == 1, "Expected a loud failure (exit 1) when dumps are missing and --demo absent."
 
 
 class TestDualProvenanceAttribution:
     """Verifies dual provenance from LOTUS and COCONUT."""
 
-    def test_source_provenance_diversity(self):
-        """Ensures LOTUS, COCONUT, and dual sources are present."""
+    def test_source_provenance_present(self):
+        """Every occurrence carries an honest source_db label (no fabricated dual rows).
+
+        The hand-typed 'LOTUS, COCONUT' Curcuma rows were removed (review X1/D2); the
+        demo index reflects only the real pilot provenance (LOTUS/Wikidata).
+        """
         compounds = data_loader.get_plant_compounds("Curcuma longa")
+        assert len(compounds) > 0
         sources = {c["source_db"] for c in compounds}
-        assert "LOTUS" in sources
-        assert "COCONUT" in sources
-        # Dual source must be represented (e.g. 'LOTUS, COCONUT')
-        assert any("LOTUS" in s and "COCONUT" in s for s in sources), (
-            f"Expected dual provenance in sources, got: {sources}"
-        )
+        assert sources, "Every compound occurrence must have a source_db label"
+        # All labels must be real source names, never empty or a fabricated mix.
+        for s in sources:
+            assert s and any(tok in s for tok in ("LOTUS", "COCONUT"))
 
     def test_compound_source_flags(self):
-        """Checks source_flags in compounds table (1: LOTUS, 2: COCONUT, 3: Both)."""
+        """source_flags encode the real provenance bitmask (1: LOTUS, 2: COCONUT, 3: Both)."""
         conn = data_loader.get_connection()
         cur = conn.cursor()
         cur.execute("SELECT DISTINCT source_flags FROM compounds")
         flags = {row[0] for row in cur.fetchall()}
-        assert 1 in flags or 2 in flags or 3 in flags
-        cur.execute("SELECT source_flags FROM compounds WHERE inchikey_block1 = 'VFLDPWHFBUODDF'")
-        curc_flag = cur.fetchone()[0]
-        assert curc_flag == 3
+        assert flags, "compounds table must not be empty"
+        assert flags <= {1, 2, 3}, f"Unexpected source_flags values: {flags}"
 
 
 class TestDataLoaderInterfaceContract:
@@ -152,14 +164,16 @@ class TestDataLoaderInterfaceContract:
             assert len(compounds) >= 239, f"Failed to retrieve compounds using synonym '{syn}'"
 
     def test_get_compound_plants_roundtrip(self):
-        """get_compound_plants retrieves plants for Curcumin skeleton (VFLDPWHFBUODDF)."""
+        """get_compound_plants retrieves source plants for the Curcumin skeleton.
+
+        Only Curcuma longa carries curcumin in the demo index now that the fabricated
+        ginger 'curcumin' row was removed (review X1); the roundtrip must still find it.
+        """
         plants = data_loader.get_compound_plants("VFLDPWHFBUODDF")
         assert len(plants) > 0
         species_names = [p["canonical_name"] for p in plants]
         assert "Curcuma longa" in species_names
-        assert "Zingiber officinale" in species_names
 
-        # Check required keys in contract
         first = plants[0]
         for key in ["canonical_name", "family", "inchikey", "n_refs", "source_db"]:
             assert key in first, f"Missing key '{key}' in get_compound_plants result"
@@ -210,19 +224,11 @@ class TestQueryPerformanceSLA:
         assert elapsed_ms < 50.0, f"Query took {elapsed_ms:.2f} ms (SLA: < 50 ms)"
 
     def test_batch_compound_plants_query_latency(self):
-        """Batch reverse lookup for 10 compounds must complete in under 50 ms."""
-        first_blocks = [
-            "VFLDPWHFBUODDF",
-            "PREBVFJICNPEKM",
-            "HJTVQHVGMGKONQ",
-            "NAAJVHHFAXWBOK",
-            "KKOXKGNSUHTUBV",
-            "GRWFGVWFFZKLTI",
-            "FZPYMZUVXJUAQA",
-            "UAHWPYUMFXYFJY",
-            "WUOACPNHFRMFPN",
-            "CRPUJAZIXJMDBK",
-        ]
+        """Batch reverse lookup for 10 real compounds must complete in under 50 ms."""
+        # Draw real skeletons straight from the index (no hard-coded InChIKeys).
+        compounds = data_loader.get_plant_compounds("Curcuma longa")
+        first_blocks = [c["inchikey_block1"] for c in compounds[:10] if c.get("inchikey_block1")]
+        assert len(first_blocks) >= 5, "Expected at least 5 indexed compounds to sample."
 
         # Warmup
         for fb in first_blocks:
@@ -279,16 +285,37 @@ class TestChemicalIdentifierAuthenticity:
 
         assert len(invalid_keys) == 0, f"Detected fabricated/invalid InChIKeys: {invalid_keys}"
 
-    def test_understudied_plants_authentic_chemical_identifiers(self):
-        """Validates that candidate under-studied plants possess authentic IUPAC InChIKeys and SMILES."""
+    def test_understudied_plants_have_no_fabricated_compounds(self):
+        """Candidate under-studied plants carry NO compounds in the demo index (review D2).
+
+        The previous version asserted >= 3 hand-typed compounds per species with invented
+        InChIKeys, DOIs and properties (six of which the review proved wrong). Those rows
+        are gone; the honest state is zero compounds until a real LOTUS/COCONUT ingestion.
+        """
         for plant in ["Smallanthus sonchifolius", "Petiveria alliacea", "Dysphania ambrosioides"]:
             compounds = data_loader.get_plant_compounds(plant)
-            assert len(compounds) >= 3, f"Expected compounds for {plant}"
-            for c in compounds:
-                assert re.match(r"^[A-Z]{14}-[A-Z]{10}-[A-Z0-9]$", c["inchikey"])
-                assert len(c["inchikey"]) == 27
-                assert c["smiles"] and len(c["smiles"]) > 3
-                assert c["mw"] and c["mw"] > 50.0
+            assert compounds == [], (
+                f"{plant} must have no compounds in the demo index; a non-empty result "
+                f"would mean fabricated seed rows reappeared ({len(compounds)} found)."
+            )
+
+    def test_every_db_inchikey_matches_its_smiles(self):
+        """RDKit connectivity gate (review X1): stored InChIKey block1 matches the SMILES."""
+        from rdkit import Chem
+        from rdkit.Chem import inchi
+
+        conn = data_loader.get_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT inchikey, inchikey_block1, smiles FROM compounds WHERE smiles IS NOT NULL AND smiles != ''")
+        mismatches = []
+        for row in cur.fetchall():
+            mol = Chem.MolFromSmiles(row["smiles"])
+            if mol is None:
+                continue  # unparseable SMILES are a warning, not a hard failure here
+            computed = inchi.MolToInchiKey(mol).split("-")[0]
+            if computed != (row["inchikey_block1"] or row["inchikey"].split("-")[0]):
+                mismatches.append((row["inchikey"], computed))
+        assert not mismatches, f"InChIKey/SMILES connectivity mismatches: {mismatches[:5]}"
 
 
 class TestQueryPlanOptimization:
